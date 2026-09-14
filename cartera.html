@@ -28,15 +28,33 @@ const { useState, useEffect, useMemo } = React;
 const DEFAULT_THRESHOLDS = { risk: 5, warn: 8 };
 const CACHE_KEY = "cartera:lastPortfolio";
 const THRESHOLDS_KEY = "cartera:thresholds";
+const VIEW_KEY = "cartera:view";
 const REFRESH_MS = 5 * 60 * 1000;
 
 const COLORS = { risk: "#B54A3F", warn: "#C9922E", healthy: "#0E7C7B", muted: "#8AA19E" };
+const DARK_COLORS = { risk: "#D4685C", warn: "#DCA94A", healthy: "#4FBFAE", muted: "#6E8C88" };
+const VIEWS = [
+  { key: "tabla", label: "Tabla" },
+  { key: "sala", label: "Sala de control" },
+  { key: "tarjetas", label: "Tarjetas" },
+];
 
 function classify(roas, thresholds) {
   if (roas === null || roas === undefined) return "muted";
   if (roas < thresholds.risk) return "risk";
   if (roas < thresholds.warn) return "warn";
   return "healthy";
+}
+
+// Color de celda del mapa de calor (vista "Sala de control"): un cuarto escalón "alto" además
+// de los 3 semáforo normales, para distinguir cuentas excelentes de simplemente sanas.
+function heatColor(v, thresholds) {
+  if (v === null || v === undefined) return { bg: "#152E2B", ink: "#5A716D" };
+  const alto = thresholds.warn * 1.5;
+  if (v < thresholds.risk) return { bg: "#B54A3F", ink: "#F2F7F5" };
+  if (v < thresholds.warn) return { bg: "#C9922E", ink: "#0B1F1D" };
+  if (v < alto) return { bg: "#2E7F72", ink: "#F2F7F5" };
+  return { bg: "#4FBFAE", ink: "#0B1F1D" };
 }
 
 function useIsMobile(breakpoint) {
@@ -77,9 +95,12 @@ function Cartera() {
   const [sortBy, setSortBy] = useState({ col: "roas", dir: "desc" });
   const [rangeTouched, setRangeTouched] = useState(false);
   const [range, setRange] = useState({ start: null, end: null });
+  const [view, setView] = useState(() => loadCache(VIEW_KEY, "tabla"));
+  const [cardFilter, setCardFilter] = useState("todos");
   const isMobile = useIsMobile(760);
 
   useEffect(() => { saveCache(THRESHOLDS_KEY, thresholds); }, [thresholds]);
+  useEffect(() => { saveCache(VIEW_KEY, view); }, [view]);
 
   const fetchLive = () => {
     setStatus((s) => (s === "cached-initial" ? s : "loading"));
@@ -129,7 +150,7 @@ function Cartera() {
     if (!rangeTouched && bounds) setRange({ start: bounds.first, end: bounds.last });
   }, [bounds, rangeTouched]);
 
-  // Meses disponibles (unión entre todos los clientes) para las píldoras de rango.
+  // Meses disponibles (unión entre todos los clientes) para las píldoras de rango y el mapa de calor.
   const ALL_MONTHS = useMemo(() => {
     const map = {};
     clients.forEach((c) => {
@@ -146,6 +167,13 @@ function Cartera() {
   }, [clients]);
 
   const isFullRange = bounds && range.start === bounds.first && range.end === bounds.last;
+
+  const rangeLabel = useMemo(() => {
+    if (isFullRange) return "acumulado";
+    const m = ALL_MONTHS.find((m) => m.start === range.start && m.end === range.end);
+    if (m) return MONTH_LABELS[m.key.slice(5, 7)] + " " + m.key.slice(0, 4);
+    return "periodo personalizado";
+  }, [isFullRange, ALL_MONTHS, range]);
 
   // ---- Una fila calculada por cliente: agregados del rango elegido, delta vs. mes anterior,
   // tendencia de los últimos 6 meses y semáforo -- todo desde aggregateExact (nunca promedios). ----
@@ -175,6 +203,20 @@ function Cartera() {
       };
     });
   }, [clients, range, thresholds]);
+
+  // Ranking fijo por ROAS (independiente del orden que el usuario elija en la tabla) --
+  // lo usan la vista "Sala de control" y la de "Tarjetas".
+  const rankedByRoas = useMemo(() => {
+    return [...rows].sort((a, b) => {
+      if (a.roas == null && b.roas == null) return 0;
+      if (a.roas == null) return 1;
+      if (b.roas == null) return -1;
+      return b.roas - a.roas;
+    });
+  }, [rows]);
+
+  // Últimos 6 meses reales del portafolio (unión entre clientes) -- columnas del mapa de calor.
+  const HEAT_MONTHS = useMemo(() => ALL_MONTHS.slice(-6), [ALL_MONTHS]);
 
   // ---- Cola de alertas real (no hardcodeada) -- reglas propuestas en el README del handoff;
   // ajusta libremente los números si al verlas correr con datos reales no calzan. ----
@@ -233,6 +275,27 @@ function Cartera() {
     });
     return out;
   }, [rows, thresholds]);
+
+  // ---- Feed de actividad reciente para "Sala de control" -- eventos reales tomados de las
+  // últimas filas diarias de cada cliente (agendas, cierres, recolección), nunca inventados. ----
+  const feed = useMemo(() => {
+    const events = [];
+    clients.forEach((c) => {
+      if (c.ok === false) return;
+      (c.daily || []).slice(-14).forEach((d) => {
+        if (d.ag > 0) {
+          events.push({ date: d.d, text: `${c.name} — ${d.ag} agenda${d.ag > 1 ? "s" : ""} nueva${d.ag > 1 ? "s" : ""}` });
+        }
+        if (d.cie > 0) {
+          events.push({ date: d.d, text: `${c.name} — ${d.cie} cierre${d.cie > 1 ? "s" : ""}${d.fac ? " · " + clp(d.fac) : ""}` });
+        } else if (d.fac > 0) {
+          events.push({ date: d.d, text: `${c.name} — recolección ${clp(d.fac)}` });
+        }
+      });
+    });
+    events.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+    return events.slice(0, 8).map((e) => ({ t: e.date.slice(8, 10) + "/" + e.date.slice(5, 7), text: e.text }));
+  }, [clients]);
 
   const filteredSorted = useMemo(() => {
     let list = rows;
@@ -293,12 +356,24 @@ function Cartera() {
     return "/?" + p.toString();
   };
 
-  const dash = (v) => (v === null || v === undefined ? "—" : v);
   const cellMoney = (row, val) => (row.ok ? k1(val) : "—");
   const cellNum = (row, val) => (row.ok ? num2(val) : "—");
 
+  const isDark = view === "sala";
+
+  const ctx = {
+    portfolio, status, errorMsg, fetchLive,
+    thresholds, setThresholds, showThresholds, setShowThresholds,
+    query, setQuery, sortBy, setSortBy, toggleSort, sortArrow,
+    bounds, ALL_MONTHS, HEAT_MONTHS, range, setRange, rangeTouched, setRangeTouched, isFullRange, rangeLabel,
+    rows, filteredSorted, rankedByRoas, totals, alerts, feed,
+    nRiesgo, nAtencion, nSanos,
+    view, setView, cardFilter, setCardFilter,
+    isMobile, linkFor, cellMoney, cellNum, isDark,
+  };
+
   return (
-    <div style={styles.page}>
+    <div style={{ ...styles.page, background: isDark ? "#0B1F1D" : "#F5F7F6" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
         * { box-sizing: border-box; }
@@ -314,73 +389,15 @@ function Cartera() {
         .odv-refresh:hover { opacity: 0.7; }
         @keyframes odvSpin { to { transform: rotate(360deg); } }
         .odv-spin { display: inline-block; animation: odvSpin 1s linear infinite; }
+        .odv-dark-row:hover { background: #152E2B; cursor: pointer; }
         input[type="date"] { color-scheme: light; }
       `}</style>
 
-      <header style={styles.header} className="odv-fade">
-        <div>
-          <div style={styles.eyebrow}>CARTERA · META ADS × VENTAS</div>
-          <h1 style={styles.h1}>Todos los clientes</h1>
-          <div style={styles.subtitle}>
-            {clients.length} cuenta{clients.length === 1 ? "" : "s"} · cifras exactas por día, nunca prorrateadas
-          </div>
-        </div>
-
-        <div style={styles.controlsCol}>
-          <div style={styles.statusRow}>
-            {status === "loading" && (
-              <span style={styles.statusBadge}><span className="odv-spin">↻</span> Conectando con Sheets…</span>
-            )}
-            {status === "live" && (
-              <span style={{ ...styles.statusBadge, color: "#0E7C7B" }}>● En vivo · sync {timeAgo(portfolio.syncedAt)}</span>
-            )}
-            {status === "cached-error" && (
-              <span style={{ ...styles.statusBadge, color: "#B54A3F" }} title={errorMsg || ""}>
-                ● Datos guardados (sin conexión en vivo)
-              </span>
-            )}
-            {status === "cached-initial" && (
-              <span style={{ ...styles.statusBadge, color: "#8AA19E" }}>● Datos guardados</span>
-            )}
-            <span className="odv-refresh" style={styles.refreshBtn} onClick={fetchLive} title="Actualizar ahora">
-              ↻ Actualizar
-            </span>
-            <span
-              className="odv-refresh"
-              style={{ ...styles.refreshBtn, color: "#5B6E6B" }}
-              onClick={() => setShowThresholds((v) => !v)}
-            >
-              ⚙ Umbrales
-            </span>
-          </div>
-
-          {bounds && (
-            <div style={styles.pillRow}>
-              <button
-                className="odv-pill"
-                style={isFullRange ? styles.pillActive : styles.pill}
-                onClick={() => { setRangeTouched(false); setRange({ start: bounds.first, end: bounds.last }); }}
-              >
-                Acumulado
-              </button>
-              {ALL_MONTHS.map((m) => (
-                <button
-                  key={m.key}
-                  className="odv-pill"
-                  style={range.start === m.start && range.end === m.end ? styles.pillActive : styles.pill}
-                  onClick={() => { setRangeTouched(true); setRange({ start: m.start, end: m.end }); }}
-                >
-                  {MONTH_LABELS[m.key.slice(5, 7)]}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </header>
+      <TopBar ctx={ctx} />
 
       {showThresholds && (
-        <div style={styles.thresholdsPanel} className="odv-fade">
-          <span style={styles.thresholdsLabel}>Umbrales de semáforo (se guardan en este navegador):</span>
+        <div style={isDark ? styles.thresholdsPanelDark : styles.thresholdsPanel} className="odv-fade">
+          <span style={isDark ? styles.thresholdsLabelDark : styles.thresholdsLabel}>Umbrales de semáforo (se guardan en este navegador):</span>
           <label style={styles.thresholdsField}>
             Riesgo bajo
             <input
@@ -400,20 +417,135 @@ function Cartera() {
         </div>
       )}
 
-      {alerts.length > 0 && (
-        <div style={styles.alertsStrip} className="odv-fade">
-          <span style={styles.alertsLabel}>REQUIERE ACCIÓN HOY</span>
-          {alerts.map((a) => (
-            <div key={a.id} style={styles.alertItem}>
-              <span style={{ fontWeight: 600, color: "#0B1F1D" }}>{a.name}</span>
-              <span style={{ color: "#5B4A16" }}>{a.text}</span>
-            </div>
+      {view === "tabla" && <VistaTabla ctx={ctx} />}
+      {view === "sala" && <VistaSala ctx={ctx} />}
+      {view === "tarjetas" && <VistaTarjetas ctx={ctx} />}
+    </div>
+  );
+}
+
+function TopBar({ ctx }) {
+  const { rows, status, portfolio, fetchLive, showThresholds, setShowThresholds, bounds, ALL_MONTHS,
+    range, setRange, rangeTouched, setRangeTouched, isFullRange, view, setView, isDark } = ctx;
+
+  const titleFor = { tabla: "Todos los clientes", sala: "Sala de control", tarjetas: "Estado de la cartera" }[view];
+  const s = isDark ? darkTop : styles;
+
+  return (
+    <header style={s.header} className="odv-fade">
+      <div>
+        <div style={s.eyebrow}>CARTERA · META ADS × VENTAS</div>
+        <h1 style={s.h1}>{titleFor}</h1>
+        <div style={s.subtitle}>
+          {rows.length} cuenta{rows.length === 1 ? "" : "s"} · {ctx.rangeLabel} · cifras exactas por día
+        </div>
+      </div>
+
+      <div style={styles.controlsCol}>
+        <div style={styles.statusRow}>
+          {status === "loading" && (
+            <span style={s.statusBadge}><span className="odv-spin">↻</span> Conectando con Sheets…</span>
+          )}
+          {status === "live" && (
+            <span style={{ ...s.statusBadge, color: isDark ? "#4FBFAE" : "#0E7C7B" }}>● En vivo · sync {timeAgo(portfolio.syncedAt)}</span>
+          )}
+          {status === "cached-error" && (
+            <span style={{ ...s.statusBadge, color: "#D4685C" }}>● Datos guardados (sin conexión en vivo)</span>
+          )}
+          {status === "cached-initial" && (
+            <span style={{ ...s.statusBadge, color: "#8AA19E" }}>● Datos guardados</span>
+          )}
+          <span className="odv-refresh" style={s.refreshBtn} onClick={fetchLive} title="Actualizar ahora">
+            ↻ Actualizar
+          </span>
+          <span
+            className="odv-refresh"
+            style={{ ...s.refreshBtn, color: isDark ? "#9FB7B3" : "#5B6E6B" }}
+            onClick={() => setShowThresholds((v) => !v)}
+          >
+            ⚙ Umbrales
+          </span>
+        </div>
+
+        <div style={styles.pillRow}>
+          {VIEWS.map((v) => (
+            <button
+              key={v.key}
+              className="odv-pill"
+              style={view === v.key ? styles.pillActive : styles.pill}
+              onClick={() => setView(v.key)}
+            >
+              {v.label}
+            </button>
           ))}
         </div>
-      )}
+
+        {bounds && (
+          <div style={styles.pillRow}>
+            <button
+              className="odv-pill"
+              style={isFullRange ? styles.pillActive : styles.pill}
+              onClick={() => { setRangeTouched(false); setRange({ start: bounds.first, end: bounds.last }); }}
+            >
+              Acumulado
+            </button>
+            {ALL_MONTHS.map((m) => (
+              <button
+                key={m.key}
+                className="odv-pill"
+                style={range.start === m.start && range.end === m.end ? styles.pillActive : styles.pill}
+                onClick={() => { setRangeTouched(true); setRange({ start: m.start, end: m.end }); }}
+              >
+                {MONTH_LABELS[m.key.slice(5, 7)]}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </header>
+  );
+}
+
+function KpiCard({ label, value, sub, accent }) {
+  const accentColor = { teal: "#0E7C7B", mint: "#3FA796", coral: "#B54A3F", amber: "#C9922E", muted: "#8AA19E" }[accent] || "#0E7C7B";
+  return (
+    <div className="odv-card" style={styles.kpiCard}>
+      <div style={{ ...styles.kpiBar, background: accentColor }} />
+      <div style={styles.kpiLabel}>{label}</div>
+      <div style={styles.kpiValue}>{value}</div>
+      {sub && <div style={{ ...styles.kpiSub, color: accentColor }}>{sub}</div>}
+    </div>
+  );
+}
+
+function AlertsStrip({ alerts }) {
+  if (!alerts.length) return null;
+  return (
+    <div style={styles.alertsStrip} className="odv-fade">
+      <span style={styles.alertsLabel}>REQUIERE ACCIÓN HOY</span>
+      {alerts.map((a) => (
+        <div key={a.id} style={styles.alertItem}>
+          <span style={{ fontWeight: 600, color: "#0B1F1D" }}>{a.name}</span>
+          <span style={{ color: "#5B4A16" }}>{a.text}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ======================= VISTA 1a — Tabla ordenable =======================
+function VistaTabla({ ctx }) {
+  const {
+    thresholds, query, setQuery, sortBy, toggleSort, sortArrow,
+    filteredSorted, totals, alerts, nRiesgo, isMobile, linkFor, cellMoney, cellNum,
+  } = ctx;
+
+  return (
+    <div>
+      <AlertsStrip alerts={alerts} />
 
       <section style={styles.kpiRow} className="odv-fade">
-        <KpiCard label="Inversión total" value={k1(totals.inv)} accent="teal" sub={`${rows.length} cuentas`} />
+        <KpiCard label="Inversión total" value={k1(totals.inv)} accent="teal" sub={`${filteredSorted.length} cuentas`} />
         <KpiCard label="Ventas cerradas" value={k1(totals.ven)} accent="mint" sub={`${totals.cie} cierres`} />
         <KpiCard label="Recolección real" value={k1(totals.fac)} accent="mint" sub={pct(totals.fac, totals.ven) + " cobrado"} />
         <KpiCard
@@ -549,7 +681,7 @@ function Cartera() {
       </section>
 
       <footer style={styles.footer}>
-        {status === "live"
+        {ctx.status === "live"
           ? "Conectado en vivo a los Sheets de todos los clientes. Se refresca al abrir la página, cada 5 min, y con el botón “Actualizar”."
           : "Mostrando datos guardados porque no se pudo conectar en vivo. Usa “Actualizar” para reintentar."}
       </footer>
@@ -557,20 +689,224 @@ function Cartera() {
   );
 }
 
-function KpiCard({ label, value, sub, accent }) {
-  const accentColor = { teal: "#0E7C7B", mint: "#3FA796", coral: "#B54A3F", amber: "#C9922E", muted: "#8AA19E" }[accent] || "#0E7C7B";
+// ======================= VISTA 1b — Tarjetas (semáforo) =======================
+function VistaTarjetas({ ctx }) {
+  const { rankedByRoas, alerts, nRiesgo, nAtencion, nSanos, cardFilter, setCardFilter, linkFor } = ctx;
+
+  const FILTERS = [
+    { key: "todos", label: `Todos · ${rankedByRoas.length}`, color: "#0E7C7B" },
+    { key: "risk", label: `En riesgo · ${nRiesgo}`, color: "#B54A3F" },
+    { key: "warn", label: `Atención · ${nAtencion}`, color: "#C9922E" },
+    { key: "healthy", label: `Ganando · ${nSanos}`, color: "#0E7C7B" },
+  ];
+
+  const list = cardFilter === "todos" ? rankedByRoas : rankedByRoas.filter((r) => r.status === cardFilter);
+
   return (
-    <div className="odv-card" style={styles.kpiCard}>
-      <div style={{ ...styles.kpiBar, background: accentColor }} />
-      <div style={styles.kpiLabel}>{label}</div>
-      <div style={styles.kpiValue}>{value}</div>
-      {sub && <div style={{ ...styles.kpiSub, color: accentColor }}>{sub}</div>}
+    <div>
+      <div style={styles.filterRow} className="odv-fade">
+        {FILTERS.map((f) => (
+          <button
+            key={f.key}
+            className="odv-pill"
+            style={cardFilter === f.key
+              ? { ...styles.pillActive, borderColor: f.color, background: f.color }
+              : { ...styles.pill, color: f.color }}
+            onClick={() => setCardFilter(f.key)}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      <AlertsStrip alerts={alerts} />
+
+      <section style={styles.cardGrid} className="odv-fade">
+        {list.map((r) => {
+          const agg = r.agg || {};
+          const asisPct = r.ok && agg.asisPct != null ? agg.asisPct : null;
+          const ccPct = r.ok && agg.ccPct != null ? agg.ccPct : null;
+          return (
+            <div key={r.key} className="odv-card" style={styles.tCard} onClick={() => { window.location.href = linkFor(r.key); }}>
+              <div style={{ ...styles.tCardBar, background: COLORS[r.status] }} />
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                <div>
+                  <div style={styles.tCardName}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}</div>
+                  {r.city && <div style={{ fontSize: 11.5, color: "#8AA19E", marginTop: 2 }}>{r.city}</div>}
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 24, fontWeight: 600, lineHeight: 1, color: COLORS[r.status] }}>
+                    {r.roas != null ? r.roas.toFixed(1).replace(".", ",") + "×" : "—"}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#8AA19E", marginTop: 3 }}>
+                    {r.deltaPct != null ? (r.deltaPct >= 0 ? "▲ " : "▼ ") + Math.abs(r.deltaPct).toFixed(0) + "% vs mes ant." : "—"}
+                  </div>
+                </div>
+              </div>
+
+              <div style={styles.tBarTrack}>
+                <div style={{ ...styles.tBarFill, width: (asisPct != null ? Math.min(100, asisPct) : 0) + "%", background: "#0E7C7B" }} />
+              </div>
+              <div style={styles.tBarCaption}><span>Asistencia</span><span>{asisPct != null ? asisPct.toFixed(0) + "%" : "—"}</span></div>
+
+              <div style={styles.tBarTrack}>
+                <div style={{ ...styles.tBarFill, width: (ccPct != null ? Math.min(100, ccPct) : 0) + "%", background: "#3FA796" }} />
+              </div>
+              <div style={styles.tBarCaption}><span>Cierre</span><span>{ccPct != null ? ccPct.toFixed(0) + "%" : "—"}</span></div>
+
+              <div style={styles.tStatsRow}>
+                <span>{r.ok && agg.cmi != null ? num2(agg.cmi) : "—"} conv</span>
+                <span>{r.ok && agg.agendas != null ? num2(agg.agendas) : "—"} ag</span>
+                <span>{r.ok && agg.asistencias != null ? num2(agg.asistencias) : "—"} asis</span>
+                <span>{r.ok && agg.cierres != null ? num2(agg.cierres) : "—"} cierres</span>
+              </div>
+
+              <div style={styles.tFootRow}>
+                <div>
+                  <div style={{ fontSize: 10.5, color: "#8AA19E" }}>Inversión</div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: "#12201F", marginTop: 2 }}>
+                    {r.ok ? k1(agg.inversion || 0) : "—"}
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 10.5, color: "#8AA19E" }}>Facturado</div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: "#12201F", marginTop: 2 }}>
+                    {r.ok ? k1(agg.recoleccion || 0) : "—"}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </section>
+
+      <div style={styles.footnote}>Clic en una tarjeta abre el panel individual del cliente con su funnel y detalle mensual.</div>
+    </div>
+  );
+}
+
+// ======================= VISTA 1c — Sala de control (mapa de calor) =======================
+function VistaSala({ ctx }) {
+  const { rankedByRoas, HEAT_MONTHS, totals, alerts, feed, thresholds, isMobile, linkFor } = ctx;
+  const maxRoas = Math.max(1, ...rankedByRoas.filter((r) => r.roas != null).map((r) => r.roas));
+
+  const heatRows = rankedByRoas.filter((r) => r.ok);
+
+  const Ranking = (
+    <div style={styles.salaCol}>
+      <div style={styles.salaLabel}>RANKING POR ROAS</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+        {heatRows.map((r) => (
+          <div key={r.key} className="odv-dark-row" style={{ padding: "2px 4px", borderRadius: 6 }} onClick={() => { window.location.href = linkFor(r.key); }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+              <span style={styles.salaClientName}>{r.name}</span>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600, color: DARK_COLORS[r.status] }}>
+                {r.roas != null ? r.roas.toFixed(1).replace(".", ",") + "×" : "—"}
+              </span>
+            </div>
+            <div style={styles.salaRankTrack}>
+              <div style={{ height: 4, borderRadius: 2, background: DARK_COLORS[r.status], width: (r.roas != null ? (r.roas / maxRoas) * 100 : 0) + "%" }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  const Heatmap = (
+    <div style={{ ...styles.salaCol, minWidth: isMobile ? 520 : undefined }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
+        <div style={styles.salaLabel}>ROAS POR MES{HEAT_MONTHS.length ? " · " + MONTH_LABELS[HEAT_MONTHS[0].key.slice(5, 7)] + " → " + MONTH_LABELS[HEAT_MONTHS[HEAT_MONTHS.length - 1].key.slice(5, 7)] : ""}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: "#6E8C88" }}>
+          <span>bajo</span>
+          <span style={{ width: 14, height: 10, background: "#B54A3F", borderRadius: 2 }} />
+          <span style={{ width: 14, height: 10, background: "#C9922E", borderRadius: 2 }} />
+          <span style={{ width: 14, height: 10, background: "#2E7F72", borderRadius: 2 }} />
+          <span style={{ width: 14, height: 10, background: "#4FBFAE", borderRadius: 2 }} />
+          <span>alto</span>
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: `132px repeat(${Math.max(1, HEAT_MONTHS.length)}, 1fr)`, gap: 4, alignItems: "center" }}>
+        <div></div>
+        {HEAT_MONTHS.map((m) => (
+          <div key={m.key} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#6E8C88", textAlign: "center" }}>
+            {MONTH_LABELS[m.key.slice(5, 7)]}
+          </div>
+        ))}
+        {heatRows.map((r) => (
+          <React.Fragment key={r.key}>
+            <div style={styles.salaClientName} onClick={() => { window.location.href = linkFor(r.key); }} className="odv-dark-row">{r.name}</div>
+            {HEAT_MONTHS.map((m) => {
+              const hasAny = r.daily.some((d) => d.d >= m.start && d.d <= m.end);
+              const v = hasAny ? aggregateExact(r.daily, m.start, m.end).roas : null;
+              const c = heatColor(v, thresholds);
+              return (
+                <div key={m.key} style={{ height: 30, borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600, color: c.ink, background: c.bg }}>
+                  {v != null ? v.toFixed(1).replace(".", ",") : "—"}
+                </div>
+              );
+            })}
+          </React.Fragment>
+        ))}
+      </div>
+    </div>
+  );
+
+  const Sidebar = (
+    <div style={styles.salaCol}>
+      <div style={styles.salaLabel}>COLA DE ATENCIÓN</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {alerts.length === 0 && <div style={{ fontSize: 12, color: "#6E8C88" }}>Todo en orden por ahora.</div>}
+        {alerts.slice(0, 6).map((a) => (
+          <div key={a.id} style={{ ...styles.salaAlertCard, borderLeftColor: a.color }}>
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: "#F2F7F5" }}>{a.name}</div>
+            <div style={{ fontSize: 11.5, color: "#9FB7B3", marginTop: 3, lineHeight: 1.4 }}>{a.text}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ ...styles.salaLabel, margin: "22px 0 12px" }}>ÚLTIMAS AGENDAS</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+        {feed.length === 0 && <div style={{ fontSize: 12, color: "#6E8C88" }}>Sin actividad reciente.</div>}
+        {feed.map((f, i) => (
+          <div key={i} style={{ display: "flex", gap: 9, alignItems: "baseline" }}>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#4FBFAE", flex: "none" }}>{f.t}</span>
+            <span style={{ fontSize: 11.5, color: "#9FB7B3", lineHeight: 1.4 }}>{f.text}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={styles.salaCard} className="odv-fade">
+      <div style={styles.salaTotalsRow}>
+        <div><span style={styles.salaTotalLabel}>INV</span> <span style={styles.salaTotalValue}>{k1(totals.inv)}</span></div>
+        <div><span style={styles.salaTotalLabel}>FACT</span> <span style={styles.salaTotalValue}>{k1(totals.fac)}</span></div>
+        <div><span style={styles.salaTotalLabel}>CIERRES</span> <span style={styles.salaTotalValue}>{num2(totals.cie)}</span></div>
+        <div><span style={styles.salaTotalLabel}>ROAS</span> <span style={{ ...styles.salaTotalValue, color: "#4FBFAE" }}>{totals.roas != null ? totals.roas.toFixed(1).replace(".", ",") + "×" : "—"}</span></div>
+      </div>
+
+      {!isMobile ? (
+        <div style={styles.salaGrid3}>
+          {Ranking}
+          {Heatmap}
+          {Sidebar}
+        </div>
+      ) : (
+        <div style={styles.salaGridMobile}>
+          {Ranking}
+          <div style={{ overflowX: "auto" }}>{Heatmap}</div>
+          {Sidebar}
+        </div>
+      )}
+
+      <div style={styles.salaFooter}>● En vivo · sync {timeAgo(ctx.portfolio.syncedAt)} · cifras exactas por día, nunca prorrateadas</div>
     </div>
   );
 }
 
 const styles = {
-  page: { fontFamily: "'Inter', sans-serif", background: "#F5F7F6", color: "#12201F", padding: "32px clamp(16px, 4vw, 48px)", minHeight: "100%" },
+  page: { fontFamily: "'Inter', sans-serif", color: "#12201F", padding: "32px clamp(16px, 4vw, 48px)", minHeight: "100%" },
   header: { display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-end", gap: 20, marginBottom: 22, borderBottom: "1px solid #DCE4E2", paddingBottom: 20 },
   eyebrow: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.08em", color: "#0E7C7B", marginBottom: 6 },
   h1: { fontFamily: "'Space Grotesk', sans-serif", fontSize: "clamp(26px, 4vw, 36px)", fontWeight: 700, margin: 0, color: "#0B1F1D" },
@@ -578,12 +914,15 @@ const styles = {
   controlsCol: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 },
   statusRow: { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", justifyContent: "flex-end" },
   statusBadge: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 },
-  refreshBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#0E7C7B", fontWeight: 600 },
+  refreshBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#0E7C7B", fontWeight: 600, cursor: "pointer" },
   pillRow: { display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end" },
   pill: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, padding: "8px 14px", borderRadius: 999, border: "1px solid #DCE4E2", background: "#fff", color: "#5B6E6B", cursor: "pointer" },
   pillActive: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, padding: "8px 14px", borderRadius: 999, border: "1px solid #0E7C7B", background: "#0E7C7B", color: "#fff", cursor: "pointer" },
+  filterRow: { display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 20 },
   thresholdsPanel: { display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", background: "#fff", border: "1px solid #E1E8E6", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "#5B6E6B" },
+  thresholdsPanelDark: { display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", background: "#122B28", border: "1px solid #1D3B38", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "#9FB7B3" },
   thresholdsLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.04em" },
+  thresholdsLabelDark: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.04em", color: "#9FB7B3" },
   thresholdsField: { display: "flex", alignItems: "center", gap: 6 },
   thresholdsInput: { width: 56, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, padding: "5px 8px", borderRadius: 6, border: "1px solid #DCE4E2" },
   alertsStrip: { background: "#FDF6E9", border: "1px solid #EBD8AE", borderRadius: 12, padding: "14px 18px", display: "flex", flexWrap: "wrap", gap: 22, alignItems: "center", marginBottom: 22 },
@@ -612,6 +951,43 @@ const styles = {
   mobileCard: { background: "#fff", border: "1px solid #E1E8E6", borderRadius: 12, padding: "14px 16px", cursor: "pointer" },
   footnote: { fontSize: 11.5, color: "#8AA19E", marginTop: 14 },
   footer: { fontSize: 11.5, color: "#8AA19E", marginTop: 8, lineHeight: 1.5 },
+
+  // --- Tarjetas (1b) ---
+  cardGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 16 },
+  tCard: { position: "relative", background: "#fff", border: "1px solid #E1E8E6", borderRadius: 14, padding: "16px 18px 14px", overflow: "hidden", cursor: "pointer" },
+  tCardBar: { position: "absolute", top: 0, left: 0, bottom: 0, width: 3 },
+  tCardName: { fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 600, color: "#0B1F1D", lineHeight: 1.25 },
+  tBarTrack: { height: 6, borderRadius: 3, background: "#EEF3F2", marginTop: 12, overflow: "hidden" },
+  tBarFill: { height: 6, borderRadius: 3 },
+  tBarCaption: { display: "flex", justifyContent: "space-between", fontSize: 10.5, color: "#8AA19E", marginTop: 4 },
+  tStatsRow: { display: "flex", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#8AA19E", marginTop: 10 },
+  tFootRow: { display: "flex", justifyContent: "space-between", marginTop: 14, paddingTop: 12, borderTop: "1px solid #EEF3F2" },
+
+  // --- Sala de control (1c) ---
+  salaCard: { background: "#0B1F1D", border: "1px solid #1D3B38", borderRadius: 14, overflow: "hidden" },
+  salaTotalsRow: { display: "flex", flexWrap: "wrap", gap: 26, alignItems: "baseline", padding: "18px 22px", borderBottom: "1px solid #1D3B38" },
+  salaTotalLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.06em", color: "#6E8C88" },
+  salaTotalValue: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, color: "#F2F7F5" },
+  salaGrid3: { display: "grid", gridTemplateColumns: "250px 1fr 268px", gap: 1, background: "#1D3B38" },
+  salaGridMobile: { display: "flex", flexDirection: "column", gap: 1, background: "#1D3B38" },
+  salaCol: { background: "#0B1F1D", padding: "18px 20px" },
+  salaLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.08em", color: "#6E8C88", marginBottom: 14 },
+  salaClientName: { fontSize: 12.5, color: "#C9D8D5", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" },
+  salaRankTrack: { height: 4, background: "#152E2B", borderRadius: 2, marginTop: 5 },
+  salaAlertCard: { background: "#122B28", border: "1px solid #1D3B38", borderLeft: "3px solid", borderRadius: 8, padding: "11px 13px" },
+  salaFooter: { padding: "12px 26px", borderTop: "1px solid #1D3B38", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#6E8C88" },
+};
+
+// Variante oscura de los estilos de cabecera usados por TopBar cuando la vista activa es
+// "Sala de control" -- misma estructura, solo cambian los colores de texto.
+const darkTop = {
+  ...styles,
+  header: { ...styles.header, borderBottom: "1px solid #1D3B38" },
+  eyebrow: { ...styles.eyebrow, color: "#4FBFAE" },
+  h1: { ...styles.h1, color: "#F2F7F5" },
+  subtitle: { ...styles.subtitle, color: "#9FB7B3" },
+  statusBadge: { ...styles.statusBadge, color: "#9FB7B3" },
+  refreshBtn: { ...styles.refreshBtn, color: "#4FBFAE" },
 };
 
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(Cartera));
