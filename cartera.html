@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cartera de Clientes — Meta Ads × Ventas</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="/lib/aggregate.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #F5F7F6; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root">
+  <div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#5B6E6B;">
+    Cargando cartera...
+  </div>
+</div>
+<script type="text/plain" id="app-source">
+
+const { useState, useEffect, useMemo } = React;
+
+// ---- Umbrales de semáforo por defecto (editables desde la propia página, se guardan en
+// localStorage -- ver README del handoff: "deben ser configurables, no hardcodeados"). ----
+const DEFAULT_THRESHOLDS = { risk: 5, warn: 8 };
+const CACHE_KEY = "cartera:lastPortfolio";
+const THRESHOLDS_KEY = "cartera:thresholds";
+const REFRESH_MS = 5 * 60 * 1000;
+
+const COLORS = { risk: "#B54A3F", warn: "#C9922E", healthy: "#0E7C7B", muted: "#8AA19E" };
+
+function classify(roas, thresholds) {
+  if (roas === null || roas === undefined) return "muted";
+  if (roas < thresholds.risk) return "risk";
+  if (roas < thresholds.warn) return "warn";
+  return "healthy";
+}
+
+function useIsMobile(breakpoint) {
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== "undefined" && window.innerWidth < breakpoint
+  );
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < breakpoint);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [breakpoint]);
+  return isMobile;
+}
+
+function loadCache(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+function saveCache(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    /* localStorage puede fallar en modo privado -- no es crítico, seguimos igual */
+  }
+}
+
+function Cartera() {
+  const [portfolio, setPortfolio] = useState(() => loadCache(CACHE_KEY, { clients: [], syncedAt: null }));
+  const [status, setStatus] = useState(() => (loadCache(CACHE_KEY, null) ? "cached-initial" : "loading"));
+  const [errorMsg, setErrorMsg] = useState(null);
+  const [thresholds, setThresholds] = useState(() => loadCache(THRESHOLDS_KEY, DEFAULT_THRESHOLDS));
+  const [showThresholds, setShowThresholds] = useState(false);
+  const [query, setQuery] = useState("");
+  const [sortBy, setSortBy] = useState({ col: "roas", dir: "desc" });
+  const [rangeTouched, setRangeTouched] = useState(false);
+  const [range, setRange] = useState({ start: null, end: null });
+  const isMobile = useIsMobile(760);
+
+  useEffect(() => { saveCache(THRESHOLDS_KEY, thresholds); }, [thresholds]);
+
+  const fetchLive = () => {
+    setStatus((s) => (s === "cached-initial" ? s : "loading"));
+    fetch("/api/portfolio?t=" + Date.now())
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.ok && json.clients && json.clients.length) {
+          setPortfolio(json);
+          setStatus("live");
+          setErrorMsg(null);
+          saveCache(CACHE_KEY, json);
+        } else {
+          setStatus("cached-error");
+          setErrorMsg(json.error || "Respuesta inválida del servidor");
+        }
+      })
+      .catch((err) => {
+        setStatus("cached-error");
+        setErrorMsg(String(err));
+      });
+  };
+
+  useEffect(() => {
+    fetchLive();
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") fetchLive();
+    }, REFRESH_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const clients = portfolio.clients || [];
+
+  // Límites reales de fecha across todos los clientes (para el selector de rango).
+  const bounds = useMemo(() => {
+    let first = null, last = null;
+    clients.forEach((c) => {
+      (c.daily || []).forEach((r) => {
+        if (!first || r.d < first) first = r.d;
+        if (!last || r.d > last) last = r.d;
+      });
+    });
+    return first && last ? { first, last } : null;
+  }, [clients]);
+
+  useEffect(() => {
+    if (!rangeTouched && bounds) setRange({ start: bounds.first, end: bounds.last });
+  }, [bounds, rangeTouched]);
+
+  // Meses disponibles (unión entre todos los clientes) para las píldoras de rango.
+  const ALL_MONTHS = useMemo(() => {
+    const map = {};
+    clients.forEach((c) => {
+      (c.daily || []).forEach((r) => {
+        const key = r.d.slice(0, 7);
+        if (!map[key]) map[key] = { key, start: r.d, end: r.d };
+        else {
+          if (r.d < map[key].start) map[key].start = r.d;
+          if (r.d > map[key].end) map[key].end = r.d;
+        }
+      });
+    });
+    return Object.keys(map).sort().map((k) => map[k]);
+  }, [clients]);
+
+  const isFullRange = bounds && range.start === bounds.first && range.end === bounds.last;
+
+  // ---- Una fila calculada por cliente: agregados del rango elegido, delta vs. mes anterior,
+  // tendencia de los últimos 6 meses y semáforo -- todo desde aggregateExact (nunca promedios). ----
+  const rows = useMemo(() => {
+    return clients.map((c) => {
+      const ok = c.ok !== false;
+      const daily = c.daily || [];
+      const agg = range.start && range.end ? aggregateExact(daily, range.start, range.end) : null;
+      const months = monthsIn(daily);
+      const lastM = months[months.length - 1] || null;
+      const prevM = months.length > 1 ? months[months.length - 2] : null;
+      const lastAgg = lastM ? aggregateExact(daily, lastM.start, lastM.end) : null;
+      const prevAgg = prevM ? aggregateExact(daily, prevM.start, prevM.end) : null;
+      const roas = ok && agg ? agg.roas : null;
+      const deltaPct =
+        lastAgg && prevAgg && lastAgg.roas != null && prevAgg.roas != null && prevAgg.roas !== 0
+          ? (lastAgg.roas / prevAgg.roas - 1) * 100
+          : null;
+      const last6 = months.slice(-6);
+      const series = last6.map((m) => aggregateExact(daily, m.start, m.end).roas);
+
+      return {
+        key: c.key, name: c.name, city: c.city, ok, daily,
+        agg, lastAgg, prevAgg, roas, deltaPct, series,
+        error: c.error || null,
+        status: ok ? classify(roas, thresholds) : "muted",
+      };
+    });
+  }, [clients, range, thresholds]);
+
+  // ---- Cola de alertas real (no hardcodeada) -- reglas propuestas en el README del handoff;
+  // ajusta libremente los números si al verlas correr con datos reales no calzan. ----
+  const alerts = useMemo(() => {
+    const out = [];
+    rows.forEach((r) => {
+      if (!r.ok || !r.daily.length) return;
+
+      if (
+        r.lastAgg && r.prevAgg && r.lastAgg.roas != null && r.prevAgg.roas != null &&
+        r.lastAgg.roas < thresholds.risk && r.prevAgg.roas < thresholds.risk
+      ) {
+        out.push({
+          id: r.key + "-roas2", name: r.name, color: COLORS.risk,
+          text: `ROAS ${r.lastAgg.roas.toFixed(1).replace(".", ",")}× · segundo mes seguido bajo ${thresholds.risk}×`,
+        });
+      }
+
+      if (r.agg && r.agg.asisPct != null && r.agg.asisPct < 50) {
+        out.push({
+          id: r.key + "-asis", name: r.name, color: COLORS.risk,
+          text: `Asistencia ${r.agg.asisPct.toFixed(0)}% en el periodo activo`,
+        });
+      }
+
+      if (r.lastAgg && r.prevAgg && r.lastAgg.cac != null && r.prevAgg.cac != null && r.prevAgg.cac > 0) {
+        const cacDelta = (r.lastAgg.cac / r.prevAgg.cac - 1) * 100;
+        if (cacDelta > 30) {
+          out.push({
+            id: r.key + "-cac", name: r.name, color: COLORS.warn,
+            text: `CAC subió ${cacDelta.toFixed(0)}% respecto al mes anterior`,
+          });
+        }
+      }
+
+      const last3 = r.daily.slice(-3);
+      if (last3.length === 3) {
+        const inv3 = last3.reduce((a, d) => a + d.inv, 0);
+        const cie3 = last3.reduce((a, d) => a + d.cie, 0);
+        if (inv3 > 0 && cie3 === 0) {
+          out.push({
+            id: r.key + "-nocierres", name: r.name, color: COLORS.warn,
+            text: "Sin cierres en los últimos 3 días con inversión activa",
+          });
+        }
+      }
+
+      const lastDate = r.daily[r.daily.length - 1].d;
+      const daysSince = Math.floor((Date.now() - new Date(lastDate + "T00:00:00").getTime()) / 86400000);
+      if (daysSince > 2) {
+        out.push({
+          id: r.key + "-sync", name: r.name, color: COLORS.warn,
+          text: `Sin datos nuevos hace ${daysSince} días (sincronización, no rendimiento)`,
+        });
+      }
+    });
+    return out;
+  }, [rows, thresholds]);
+
+  const filteredSorted = useMemo(() => {
+    let list = rows;
+    const q = normText(query);
+    if (q) list = list.filter((r) => normText(r.name).includes(q) || normText(r.city || "").includes(q));
+
+    const dir = sortBy.dir === "asc" ? 1 : -1;
+    const val = (r) => {
+      switch (sortBy.col) {
+        case "name": return normText(r.name);
+        case "inv": return r.agg ? r.agg.inversion : -1;
+        case "fac": return r.agg ? r.agg.recoleccion : -1;
+        case "ag": return r.agg ? r.agg.agendas : -1;
+        case "cie": return r.agg ? r.agg.cierres : -1;
+        case "cc": return r.agg && r.agg.ccPct != null ? r.agg.ccPct : -1;
+        case "cac": return r.agg && r.agg.cac != null ? r.agg.cac : -1;
+        default: return r.roas != null ? r.roas : -1;
+      }
+    };
+    return [...list].sort((a, b) => {
+      const va = val(a), vb = val(b);
+      if (va < vb) return -1 * dir;
+      if (va > vb) return 1 * dir;
+      return 0;
+    });
+  }, [rows, query, sortBy]);
+
+  const totals = useMemo(() => {
+    const okRows = rows.filter((r) => r.ok && r.agg);
+    const sum = (fn) => okRows.reduce((a, r) => a + fn(r.agg), 0);
+    const inv = sum((a) => a.inversion);
+    const fac = sum((a) => a.recoleccion);
+    const ven = sum((a) => a.ventas);
+    const cie = sum((a) => a.cierres);
+    const ag = sum((a) => a.agendas);
+    const asi = sum((a) => a.asistencias);
+    return {
+      inv, fac, ven, cie, ag, asi,
+      roas: inv ? fac / inv : null,
+      cac: cie ? inv / cie : null,
+      cc: asi ? (cie / asi) * 100 : null,
+    };
+  }, [rows]);
+
+  const nRiesgo = rows.filter((r) => r.status === "risk").length;
+  const nAtencion = rows.filter((r) => r.status === "warn").length;
+  const nSanos = rows.filter((r) => r.status === "healthy").length;
+
+  const toggleSort = (col) => {
+    setSortBy((s) => (s.col === col ? { col, dir: s.dir === "asc" ? "desc" : "asc" } : { col, dir: "desc" }));
+  };
+
+  const sortArrow = (col) => (sortBy.col === col ? (sortBy.dir === "asc" ? " ▲" : " ▼") : "");
+
+  const linkFor = (key) => {
+    const p = new URLSearchParams({ client: key });
+    if (range.start && range.end) { p.set("start", range.start); p.set("end", range.end); }
+    return "/?" + p.toString();
+  };
+
+  const dash = (v) => (v === null || v === undefined ? "—" : v);
+  const cellMoney = (row, val) => (row.ok ? k1(val) : "—");
+  const cellNum = (row, val) => (row.ok ? num2(val) : "—");
+
+  return (
+    <div style={styles.page}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+        * { box-sizing: border-box; }
+        .odv-card { transition: transform .18s ease, box-shadow .18s ease; }
+        .odv-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(11,31,29,0.10); }
+        .odv-row:hover { background: #F5F7F6; cursor: pointer; }
+        .odv-pill { transition: background .15s ease, color .15s ease; }
+        .odv-fade { animation: odvFade .5s ease both; }
+        @keyframes odvFade { from { opacity: 0; transform: translateY(6px);} to { opacity:1; transform:none; } }
+        .odv-th { cursor: pointer; user-select: none; }
+        .odv-th:hover { color: #0E7C7B; }
+        .odv-refresh { transition: opacity .15s ease; cursor: pointer; }
+        .odv-refresh:hover { opacity: 0.7; }
+        @keyframes odvSpin { to { transform: rotate(360deg); } }
+        .odv-spin { display: inline-block; animation: odvSpin 1s linear infinite; }
+        input[type="date"] { color-scheme: light; }
+      `}</style>
+
+      <header style={styles.header} className="odv-fade">
+        <div>
+          <div style={styles.eyebrow}>CARTERA · META ADS × VENTAS</div>
+          <h1 style={styles.h1}>Todos los clientes</h1>
+          <div style={styles.subtitle}>
+            {clients.length} cuenta{clients.length === 1 ? "" : "s"} · cifras exactas por día, nunca prorrateadas
+          </div>
+        </div>
+
+        <div style={styles.controlsCol}>
+          <div style={styles.statusRow}>
+            {status === "loading" && (
+              <span style={styles.statusBadge}><span className="odv-spin">↻</span> Conectando con Sheets…</span>
+            )}
+            {status === "live" && (
+              <span style={{ ...styles.statusBadge, color: "#0E7C7B" }}>● En vivo · sync {timeAgo(portfolio.syncedAt)}</span>
+            )}
+            {status === "cached-error" && (
+              <span style={{ ...styles.statusBadge, color: "#B54A3F" }} title={errorMsg || ""}>
+                ● Datos guardados (sin conexión en vivo)
+              </span>
+            )}
+            {status === "cached-initial" && (
+              <span style={{ ...styles.statusBadge, color: "#8AA19E" }}>● Datos guardados</span>
+            )}
+            <span className="odv-refresh" style={styles.refreshBtn} onClick={fetchLive} title="Actualizar ahora">
+              ↻ Actualizar
+            </span>
+            <span
+              className="odv-refresh"
+              style={{ ...styles.refreshBtn, color: "#5B6E6B" }}
+              onClick={() => setShowThresholds((v) => !v)}
+            >
+              ⚙ Umbrales
+            </span>
+          </div>
+
+          {bounds && (
+            <div style={styles.pillRow}>
+              <button
+                className="odv-pill"
+                style={isFullRange ? styles.pillActive : styles.pill}
+                onClick={() => { setRangeTouched(false); setRange({ start: bounds.first, end: bounds.last }); }}
+              >
+                Acumulado
+              </button>
+              {ALL_MONTHS.map((m) => (
+                <button
+                  key={m.key}
+                  className="odv-pill"
+                  style={range.start === m.start && range.end === m.end ? styles.pillActive : styles.pill}
+                  onClick={() => { setRangeTouched(true); setRange({ start: m.start, end: m.end }); }}
+                >
+                  {MONTH_LABELS[m.key.slice(5, 7)]}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </header>
+
+      {showThresholds && (
+        <div style={styles.thresholdsPanel} className="odv-fade">
+          <span style={styles.thresholdsLabel}>Umbrales de semáforo (se guardan en este navegador):</span>
+          <label style={styles.thresholdsField}>
+            Riesgo bajo
+            <input
+              type="number" step="0.5" min="0" value={thresholds.risk}
+              style={styles.thresholdsInput}
+              onChange={(e) => setThresholds((t) => ({ ...t, risk: Number(e.target.value) }))}
+            /> ×
+          </label>
+          <label style={styles.thresholdsField}>
+            Atención bajo
+            <input
+              type="number" step="0.5" min="0" value={thresholds.warn}
+              style={styles.thresholdsInput}
+              onChange={(e) => setThresholds((t) => ({ ...t, warn: Number(e.target.value) }))}
+            /> ×
+          </label>
+        </div>
+      )}
+
+      {alerts.length > 0 && (
+        <div style={styles.alertsStrip} className="odv-fade">
+          <span style={styles.alertsLabel}>REQUIERE ACCIÓN HOY</span>
+          {alerts.map((a) => (
+            <div key={a.id} style={styles.alertItem}>
+              <span style={{ fontWeight: 600, color: "#0B1F1D" }}>{a.name}</span>
+              <span style={{ color: "#5B4A16" }}>{a.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <section style={styles.kpiRow} className="odv-fade">
+        <KpiCard label="Inversión total" value={k1(totals.inv)} accent="teal" sub={`${rows.length} cuentas`} />
+        <KpiCard label="Ventas cerradas" value={k1(totals.ven)} accent="mint" sub={`${totals.cie} cierres`} />
+        <KpiCard label="Recolección real" value={k1(totals.fac)} accent="mint" sub={pct(totals.fac, totals.ven) + " cobrado"} />
+        <KpiCard
+          label="ROAS de cartera"
+          value={totals.roas != null ? totals.roas.toFixed(1).replace(".", ",") + "×" : "—"}
+          accent="coral"
+          sub={totals.cac != null ? "CAC " + k1(totals.cac) : "sin inversión"}
+        />
+        <KpiCard label="Cuentas en riesgo" value={nRiesgo} accent="amber" sub={`ROAS bajo ${thresholds.risk}×`} />
+      </section>
+
+      <section style={styles.panel} className="odv-fade">
+        <div style={styles.toolbar}>
+          <div style={styles.panelTitle}>Detalle por cliente</div>
+          <div style={styles.toolbarRight}>
+            <input
+              type="text"
+              placeholder="Buscar cliente…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              style={styles.searchInput}
+            />
+          </div>
+        </div>
+
+        {!isMobile ? (
+          <div style={styles.tableWrap}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={{ ...styles.th, textAlign: "left" }} className="odv-th" onClick={() => toggleSort("name")}>Cliente{sortArrow("name")}</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("inv")}>Inversión{sortArrow("inv")}</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("fac")}>Facturado{sortArrow("fac")}</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("ag")}>Agendas{sortArrow("ag")}</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("cie")}>Cierres{sortArrow("cie")}</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("cc")}>CC%{sortArrow("cc")}</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("cac")}>CAC{sortArrow("cac")}</th>
+                  <th style={{ ...styles.th, textAlign: "left" }}>Tendencia ROAS</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("roas")}>ROAS{sortArrow("roas")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredSorted.map((r) => {
+                  const maxSeries = Math.max(1, ...r.series.filter((v) => v != null));
+                  return (
+                    <tr key={r.key} className="odv-row" onClick={() => { window.location.href = linkFor(r.key); }}>
+                      <td style={styles.tdName}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <span style={{ width: 7, height: 7, borderRadius: "50%", flex: "none", background: COLORS[r.status] }} />
+                          <div>
+                            <div style={{ fontWeight: 600, color: "#0B1F1D" }}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}</div>
+                            {r.city && <div style={{ fontSize: 11.5, color: "#8AA19E" }}>{r.city}</div>}
+                          </div>
+                        </div>
+                      </td>
+                      <td style={styles.td}>{cellMoney(r, r.agg && r.agg.inversion)}</td>
+                      <td style={styles.td}>{cellMoney(r, r.agg && r.agg.recoleccion)}</td>
+                      <td style={styles.td}>{cellNum(r, r.agg && r.agg.agendas)}</td>
+                      <td style={styles.td}>{cellNum(r, r.agg && r.agg.cierres)}</td>
+                      <td style={styles.td}>{r.ok && r.agg && r.agg.ccPct != null ? r.agg.ccPct.toFixed(0) + "%" : "—"}</td>
+                      <td style={styles.td}>{r.ok && r.agg && r.agg.cac != null ? k1(r.agg.cac) : "—"}</td>
+                      <td style={styles.td}>
+                        <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 26 }}>
+                          {r.series.map((v, i) => (
+                            <span
+                              key={i}
+                              style={{
+                                width: 7, borderRadius: 1.5,
+                                background: v == null ? "#EEF3F2" : COLORS[classify(v, thresholds)],
+                                height: Math.max(3, v == null ? 3 : (v / maxSeries) * 26),
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </td>
+                      <td style={{ ...styles.td, textAlign: "right" }}>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, fontSize: 13.5, color: COLORS[r.status] }}>
+                          {r.roas != null ? r.roas.toFixed(1).replace(".", ",") + "×" : "—"}
+                        </span>
+                        <div style={{ fontSize: 11, color: "#8AA19E" }}>
+                          {r.deltaPct != null ? (r.deltaPct >= 0 ? "▲ " : "▼ ") + Math.abs(r.deltaPct).toFixed(0) + "% vs mes ant." : "—"}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td style={styles.tdTotal}>Cartera completa</td>
+                  <td style={styles.tdTotalNum}>{k1(totals.inv)}</td>
+                  <td style={styles.tdTotalNum}>{k1(totals.fac)}</td>
+                  <td style={styles.tdTotalNum}>{num2(totals.ag)}</td>
+                  <td style={styles.tdTotalNum}>{num2(totals.cie)}</td>
+                  <td style={styles.tdTotalNum}>{totals.cc != null ? totals.cc.toFixed(0) + "%" : "—"}</td>
+                  <td style={styles.tdTotalNum}>{totals.cac != null ? k1(totals.cac) : "—"}</td>
+                  <td style={styles.tdTotal}></td>
+                  <td style={{ ...styles.tdTotalNum, color: "#0E7C7B" }}>
+                    {totals.roas != null ? totals.roas.toFixed(1).replace(".", ",") + "×" : "—"}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        ) : (
+          <div style={styles.mobileList}>
+            {filteredSorted.map((r) => (
+              <div key={r.key} style={styles.mobileCard} onClick={() => { window.location.href = linkFor(r.key); }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", flex: "none", background: COLORS[r.status] }} />
+                    <div>
+                      <div style={{ fontWeight: 600, color: "#0B1F1D" }}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}</div>
+                      {r.city && <div style={{ fontSize: 11.5, color: "#8AA19E" }}>{r.city}</div>}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, fontSize: 18, color: COLORS[r.status] }}>
+                      {r.roas != null ? r.roas.toFixed(1).replace(".", ",") + "×" : "—"}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>
+                  <span>Inv. {cellMoney(r, r.agg && r.agg.inversion)}</span>
+                  <span>Fact. {cellMoney(r, r.agg && r.agg.recoleccion)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={styles.footnote}>Clic en un cliente abre su panel individual con el funnel y el detalle mensual completo.</div>
+      </section>
+
+      <footer style={styles.footer}>
+        {status === "live"
+          ? "Conectado en vivo a los Sheets de todos los clientes. Se refresca al abrir la página, cada 5 min, y con el botón “Actualizar”."
+          : "Mostrando datos guardados porque no se pudo conectar en vivo. Usa “Actualizar” para reintentar."}
+      </footer>
+    </div>
+  );
+}
+
+function KpiCard({ label, value, sub, accent }) {
+  const accentColor = { teal: "#0E7C7B", mint: "#3FA796", coral: "#B54A3F", amber: "#C9922E", muted: "#8AA19E" }[accent] || "#0E7C7B";
+  return (
+    <div className="odv-card" style={styles.kpiCard}>
+      <div style={{ ...styles.kpiBar, background: accentColor }} />
+      <div style={styles.kpiLabel}>{label}</div>
+      <div style={styles.kpiValue}>{value}</div>
+      {sub && <div style={{ ...styles.kpiSub, color: accentColor }}>{sub}</div>}
+    </div>
+  );
+}
+
+const styles = {
+  page: { fontFamily: "'Inter', sans-serif", background: "#F5F7F6", color: "#12201F", padding: "32px clamp(16px, 4vw, 48px)", minHeight: "100%" },
+  header: { display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-end", gap: 20, marginBottom: 22, borderBottom: "1px solid #DCE4E2", paddingBottom: 20 },
+  eyebrow: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.08em", color: "#0E7C7B", marginBottom: 6 },
+  h1: { fontFamily: "'Space Grotesk', sans-serif", fontSize: "clamp(26px, 4vw, 36px)", fontWeight: 700, margin: 0, color: "#0B1F1D" },
+  subtitle: { fontSize: 14, color: "#5B6E6B", marginTop: 6 },
+  controlsCol: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 },
+  statusRow: { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", justifyContent: "flex-end" },
+  statusBadge: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 },
+  refreshBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#0E7C7B", fontWeight: 600 },
+  pillRow: { display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end" },
+  pill: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, padding: "8px 14px", borderRadius: 999, border: "1px solid #DCE4E2", background: "#fff", color: "#5B6E6B", cursor: "pointer" },
+  pillActive: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, padding: "8px 14px", borderRadius: 999, border: "1px solid #0E7C7B", background: "#0E7C7B", color: "#fff", cursor: "pointer" },
+  thresholdsPanel: { display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", background: "#fff", border: "1px solid #E1E8E6", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "#5B6E6B" },
+  thresholdsLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.04em" },
+  thresholdsField: { display: "flex", alignItems: "center", gap: 6 },
+  thresholdsInput: { width: 56, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, padding: "5px 8px", borderRadius: 6, border: "1px solid #DCE4E2" },
+  alertsStrip: { background: "#FDF6E9", border: "1px solid #EBD8AE", borderRadius: 12, padding: "14px 18px", display: "flex", flexWrap: "wrap", gap: 22, alignItems: "center", marginBottom: 22 },
+  alertsLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.06em", color: "#8A6B22" },
+  alertItem: { display: "flex", alignItems: "baseline", gap: 8, fontSize: 13, color: "#5B4A16" },
+  kpiRow: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 16, marginBottom: 24 },
+  kpiCard: { position: "relative", background: "#fff", border: "1px solid #E1E8E6", borderRadius: 14, padding: "18px 18px 16px", overflow: "hidden" },
+  kpiBar: { position: "absolute", top: 0, left: 0, right: 0, height: 3 },
+  kpiLabel: { fontSize: 12.5, color: "#5B6E6B", marginBottom: 8 },
+  kpiValue: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 22, fontWeight: 600, color: "#0B1F1D" },
+  kpiSub: { fontSize: 12, marginTop: 6, fontWeight: 500 },
+  panel: { background: "#fff", border: "1px solid #E1E8E6", borderRadius: 14, padding: "20px 22px", marginBottom: 16 },
+  panelTitle: { fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 600, color: "#0B1F1D" },
+  toolbar: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 },
+  toolbarRight: { display: "flex", gap: 8, alignItems: "center" },
+  searchInput: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#5B6E6B", border: "1px solid #DCE4E2", borderRadius: 8, padding: "7px 12px", background: "#fff", minWidth: 180 },
+  tableWrap: { overflowX: "auto" },
+  table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
+  th: { textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 500, fontSize: 11, letterSpacing: "0.03em", color: "#5B6E6B", borderBottom: "1px solid #DCE4E2", padding: "8px 10px", whiteSpace: "nowrap" },
+  td: { padding: "11px 10px", borderBottom: "1px solid #EEF3F2", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: "#12201F", whiteSpace: "nowrap" },
+  tdName: { padding: "11px 10px", borderBottom: "1px solid #EEF3F2" },
+  tdTotal: { padding: "13px 10px", borderTop: "2px solid #DCE4E2", fontWeight: 600, color: "#0B1F1D" },
+  tdTotalNum: { padding: "13px 10px", borderTop: "2px solid #DCE4E2", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: "#0B1F1D" },
+  sinDatos: { fontWeight: 400, color: "#8AA19E" },
+  mobileList: { display: "flex", flexDirection: "column", gap: 10 },
+  mobileCard: { background: "#fff", border: "1px solid #E1E8E6", borderRadius: 12, padding: "14px 16px", cursor: "pointer" },
+  footnote: { fontSize: 11.5, color: "#8AA19E", marginTop: 14 },
+  footer: { fontSize: 11.5, color: "#8AA19E", marginTop: 8, lineHeight: 1.5 },
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(Cartera));
+
+</script>
+<script>
+  (function () {
+    var src = document.getElementById('app-source').textContent;
+    var out = Babel.transform(src, { presets: [['react', { runtime: 'classic' }]] });
+    (0, eval)(out.code);
+  })();
+</script>
+</body>
+</html>

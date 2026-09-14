@@ -1,0 +1,4 @@
+{
+  "_comment": "Ciudad de cada cliente para la vista de Cartera. La clave es la misma CLAVE en minúscula que usas en SHEET_ID_<CLAVE>. Un cliente que no aparezca aquí simplemente no muestra la línea de ciudad — no rompe nada. Edita este archivo y haz commit/push para actualizar.",
+  "odontovida": { "city": "Viña del Mar" }
+}
