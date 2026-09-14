@@ -1,3 +1,4 @@
+
 // api/_lib/sheetCore.js — lógica compartida de acceso a Google Sheets.
 //
 // Extraído de api/sheet.js para que api/sheet.js (panel individual) y
@@ -76,7 +77,10 @@ async function fetchSheetTitles(accessToken, sheetId) {
 }
 
 // Lee el rango completo de UNA pestaña (por nombre) como valores SIN formatear
-// (números crudos, no "$25.870").
+// (números crudos, no "$25.870"). Se mantiene para compatibilidad/tests puntuales,
+// pero readClientSheet ya NO la usa (ver fetchSheetValuesBatch) -- un cliente con muchas
+// pestañas (una por mes) hacía una llamada a Google POR PESTAÑA, y eso agotaba la cuota
+// de lecturas por minuto en cuanto había varios clientes cargando a la vez.
 async function fetchSheetValues(accessToken, sheetId, sheetTitle) {
   const escapedTitle = sheetTitle.replace(/'/g, "''");
   const range = `'${escapedTitle}'!A1:AZ2000`;
@@ -89,6 +93,29 @@ async function fetchSheetValues(accessToken, sheetId, sheetTitle) {
     throw new Error(`Error leyendo la pestaña "${sheetTitle}": ` + JSON.stringify(json));
   }
   return json.values || [];
+}
+
+// Lee VARIAS pestañas en una sola llamada a la API (values:batchGet) -- así un cliente con,
+// por ejemplo, 12 pestañas (una por mes) gasta 1 lectura en vez de 12. Esto es lo que evita
+// chocar con "Read requests per minute per user" cuando la cartera carga varios clientes
+// en paralelo (cada uno con su propia tanda de meses).
+async function fetchSheetValuesBatch(accessToken, sheetId, sheetTitles) {
+  const params = new URLSearchParams();
+  sheetTitles.forEach((title) => {
+    const escapedTitle = title.replace(/'/g, "''");
+    params.append("ranges", `'${escapedTitle}'!A1:AZ2000`);
+  });
+  params.append("valueRenderOption", "UNFORMATTED_VALUE");
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values:batchGet?${params.toString()}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error("Error leyendo las pestañas del Sheets (batch): " + JSON.stringify(json));
+  }
+  const valueRanges = json.valueRanges || [];
+  // Google devuelve valueRanges en el MISMO ORDEN en que se pidieron los `ranges` -- por eso
+  // podemos emparejar por índice con la lista de títulos original.
+  return sheetTitles.map((title, i) => ({ title, values: (valueRanges[i] && valueRanges[i].values) || [] }));
 }
 
 const NEEDED_HEADERS = [
@@ -304,11 +331,15 @@ async function readClientSheet(accessToken, sheetId) {
   const titles = await fetchSheetTitles(accessToken, sheetId);
   if (titles.length === 0) throw new Error("El Sheets no tiene ninguna pestaña visible.");
 
+  // 1 sola llamada batchGet para TODAS las pestañas (en vez de una llamada por pestaña) --
+  // esto es lo que mantiene el consumo de cuota de Google bajo aunque un cliente tenga
+  // muchos meses de pestañas y haya varios clientes cargando a la vez.
+  const batches = await fetchSheetValuesBatch(accessToken, sheetId, titles);
+
   let daily = [];
   const debugInfo = [];
   let registryRows = null;
-  for (const title of titles) {
-    const rows = await fetchSheetValues(accessToken, sheetId, title);
+  for (const { title, values: rows } of batches) {
     if (title === REGISTRY_TAB) registryRows = rows;
     const found = parseDaily(rows);
     debugInfo.push({ pestaña: title, filas_leidas: rows.length, dias_encontrados: found.length });
@@ -333,6 +364,7 @@ module.exports = {
   getAccessToken,
   fetchSheetTitles,
   fetchSheetValues,
+  fetchSheetValuesBatch,
   parseDaily,
   parseUltimaAgenda,
   getClients,
