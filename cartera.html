@@ -308,7 +308,11 @@ function Cartera() {
         case "name": return normText(r.name);
         case "inv": return r.agg ? r.agg.inversion : -1;
         case "fac": return r.agg ? r.agg.recoleccion : -1;
+        case "cmi": return r.agg ? r.agg.cmi : -1;
         case "ag": return r.agg ? r.agg.agendas : -1;
+        case "scr": return r.agg && r.agg.scr != null ? r.agg.scr : -1;
+        case "asi": return r.agg ? r.agg.asistencias : -1;
+        case "asisPct": return r.agg && r.agg.asisPct != null ? r.agg.asisPct : -1;
         case "cie": return r.agg ? r.agg.cierres : -1;
         case "cc": return r.agg && r.agg.ccPct != null ? r.agg.ccPct : -1;
         case "cac": return r.agg && r.agg.cac != null ? r.agg.cac : -1;
@@ -332,11 +336,17 @@ function Cartera() {
     const cie = sum((a) => a.cierres);
     const ag = sum((a) => a.agendas);
     const asi = sum((a) => a.asistencias);
+    const cmi = sum((a) => a.cmi);
+    const citas = sum((a) => a.citas);
     return {
-      inv, fac, ven, cie, ag, asi,
+      inv, fac, ven, cie, ag, asi, cmi, citas,
       roas: inv ? fac / inv : null,
       cac: cie ? inv / cie : null,
       cc: asi ? (cie / asi) * 100 : null,
+      // % de agendamiento = agendas sobre CMI (conversaciones), igual que agg.scr por cliente.
+      scr: cmi ? (ag / cmi) * 100 : null,
+      // % de asistencias = asistencias sobre citas, igual que agg.asisPct por cliente.
+      asisPct: citas ? (asi / citas) * 100 : null,
     };
   }, [rows]);
 
@@ -579,7 +589,11 @@ function VistaTabla({ ctx }) {
                   <th style={{ ...styles.th, textAlign: "left" }} className="odv-th" onClick={() => toggleSort("name")}>Cliente{sortArrow("name")}</th>
                   <th style={styles.th} className="odv-th" onClick={() => toggleSort("inv")}>Inversión{sortArrow("inv")}</th>
                   <th style={styles.th} className="odv-th" onClick={() => toggleSort("fac")}>Facturado{sortArrow("fac")}</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("cmi")}>CMI{sortArrow("cmi")}</th>
                   <th style={styles.th} className="odv-th" onClick={() => toggleSort("ag")}>Agendas{sortArrow("ag")}</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("scr")}>% Agend.{sortArrow("scr")}</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("asi")}>Asistencias{sortArrow("asi")}</th>
+                  <th style={styles.th} className="odv-th" onClick={() => toggleSort("asisPct")}>% Asist.{sortArrow("asisPct")}</th>
                   <th style={styles.th} className="odv-th" onClick={() => toggleSort("cie")}>Cierres{sortArrow("cie")}</th>
                   <th style={styles.th} className="odv-th" onClick={() => toggleSort("cc")}>CC%{sortArrow("cc")}</th>
                   <th style={styles.th} className="odv-th" onClick={() => toggleSort("cac")}>CAC{sortArrow("cac")}</th>
@@ -603,7 +617,11 @@ function VistaTabla({ ctx }) {
                       </td>
                       <td style={styles.td}>{cellMoney(r, r.agg && r.agg.inversion)}</td>
                       <td style={styles.td}>{cellMoney(r, r.agg && r.agg.recoleccion)}</td>
+                      <td style={styles.td}>{cellNum(r, r.agg && r.agg.cmi)}</td>
                       <td style={styles.td}>{cellNum(r, r.agg && r.agg.agendas)}</td>
+                      <td style={styles.td}>{r.ok && r.agg && r.agg.scr != null ? r.agg.scr.toFixed(0) + "%" : "—"}</td>
+                      <td style={styles.td}>{cellNum(r, r.agg && r.agg.asistencias)}</td>
+                      <td style={styles.td}>{r.ok && r.agg && r.agg.asisPct != null ? r.agg.asisPct.toFixed(0) + "%" : "—"}</td>
                       <td style={styles.td}>{cellNum(r, r.agg && r.agg.cierres)}</td>
                       <td style={styles.td}>{r.ok && r.agg && r.agg.ccPct != null ? r.agg.ccPct.toFixed(0) + "%" : "—"}</td>
                       <td style={styles.td}>{r.ok && r.agg && r.agg.cac != null ? k1(r.agg.cac) : "—"}</td>
@@ -638,7 +656,11 @@ function VistaTabla({ ctx }) {
                   <td style={styles.tdTotal}>Cartera completa</td>
                   <td style={styles.tdTotalNum}>{k1(totals.inv)}</td>
                   <td style={styles.tdTotalNum}>{k1(totals.fac)}</td>
+                  <td style={styles.tdTotalNum}>{num2(totals.cmi)}</td>
                   <td style={styles.tdTotalNum}>{num2(totals.ag)}</td>
+                  <td style={styles.tdTotalNum}>{totals.scr != null ? totals.scr.toFixed(0) + "%" : "—"}</td>
+                  <td style={styles.tdTotalNum}>{num2(totals.asi)}</td>
+                  <td style={styles.tdTotalNum}>{totals.asisPct != null ? totals.asisPct.toFixed(0) + "%" : "—"}</td>
                   <td style={styles.tdTotalNum}>{num2(totals.cie)}</td>
                   <td style={styles.tdTotalNum}>{totals.cc != null ? totals.cc.toFixed(0) + "%" : "—"}</td>
                   <td style={styles.tdTotalNum}>{totals.cac != null ? k1(totals.cac) : "—"}</td>
@@ -672,6 +694,11 @@ function VistaTabla({ ctx }) {
                   <span>Inv. {cellMoney(r, r.agg && r.agg.inversion)}</span>
                   <span>Fact. {cellMoney(r, r.agg && r.agg.recoleccion)}</span>
                 </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: "#5B6E6B" }}>
+                  <span>CMI {cellNum(r, r.agg && r.agg.cmi)}</span>
+                  <span>Ag. {cellNum(r, r.agg && r.agg.agendas)} ({r.ok && r.agg && r.agg.scr != null ? r.agg.scr.toFixed(0) + "%" : "—"})</span>
+                  <span>Asis. {cellNum(r, r.agg && r.agg.asistencias)} ({r.ok && r.agg && r.agg.asisPct != null ? r.agg.asisPct.toFixed(0) + "%" : "—"})</span>
+                </div>
               </div>
             ))}
           </div>
@@ -701,6 +728,11 @@ function VistaTarjetas({ ctx }) {
   ];
 
   const list = cardFilter === "todos" ? rankedByRoas : rankedByRoas.filter((r) => r.status === cardFilter);
+
+  // Máximos del conjunto visible para normalizar las barras de CMI y Agendas (son conteos,
+  // no porcentajes, así que se muestran en relación a la cuenta más alta del filtro actual).
+  const maxCmi = Math.max(1, ...list.map((r) => (r.ok && r.agg && r.agg.cmi != null ? r.agg.cmi : 0)));
+  const maxAgendas = Math.max(1, ...list.map((r) => (r.ok && r.agg && r.agg.agendas != null ? r.agg.agendas : 0)));
 
   return (
     <div>
@@ -745,6 +777,16 @@ function VistaTarjetas({ ctx }) {
               </div>
 
               <div style={styles.tBarTrack}>
+                <div style={{ ...styles.tBarFill, width: (r.ok && agg.cmi != null ? Math.min(100, (agg.cmi / maxCmi) * 100) : 0) + "%", background: "#C9922E" }} />
+              </div>
+              <div style={styles.tBarCaption}><span>CMI</span><span>{r.ok && agg.cmi != null ? num2(agg.cmi) : "—"}</span></div>
+
+              <div style={styles.tBarTrack}>
+                <div style={{ ...styles.tBarFill, width: (r.ok && agg.agendas != null ? Math.min(100, (agg.agendas / maxAgendas) * 100) : 0) + "%", background: "#4C7EA6" }} />
+              </div>
+              <div style={styles.tBarCaption}><span>Agendas</span><span>{r.ok && agg.agendas != null ? num2(agg.agendas) : "—"}</span></div>
+
+              <div style={styles.tBarTrack}>
                 <div style={{ ...styles.tBarFill, width: (asisPct != null ? Math.min(100, asisPct) : 0) + "%", background: "#0E7C7B" }} />
               </div>
               <div style={styles.tBarCaption}><span>Asistencia</span><span>{asisPct != null ? asisPct.toFixed(0) + "%" : "—"}</span></div>
@@ -755,8 +797,6 @@ function VistaTarjetas({ ctx }) {
               <div style={styles.tBarCaption}><span>Cierre</span><span>{ccPct != null ? ccPct.toFixed(0) + "%" : "—"}</span></div>
 
               <div style={styles.tStatsRow}>
-                <span>{r.ok && agg.cmi != null ? num2(agg.cmi) : "—"} conv</span>
-                <span>{r.ok && agg.agendas != null ? num2(agg.agendas) : "—"} ag</span>
                 <span>{r.ok && agg.asistencias != null ? num2(agg.asistencias) : "—"} asis</span>
                 <span>{r.ok && agg.cierres != null ? num2(agg.cierres) : "—"} cierres</span>
               </div>
@@ -785,30 +825,73 @@ function VistaTarjetas({ ctx }) {
   );
 }
 
+// Métricas disponibles en el ranking de la Sala de control -- "get" saca el valor del row
+// (el mismo `row` que arma la tabla/tarjetas, con .agg ya calculado para el rango elegido).
+const RANKING_METRICS = [
+  { key: "roas", label: "ROAS", fmt: (v) => (v != null ? v.toFixed(1).replace(".", ",") + "×" : "—"), get: (r) => r.roas },
+  { key: "scr", label: "Agendamiento", fmt: (v) => (v != null ? v.toFixed(0) + "%" : "—"), get: (r) => (r.ok && r.agg ? r.agg.scr : null) },
+  { key: "asisPct", label: "Asistencias", fmt: (v) => (v != null ? v.toFixed(0) + "%" : "—"), get: (r) => (r.ok && r.agg ? r.agg.asisPct : null) },
+  { key: "ccPct", label: "Cierre", fmt: (v) => (v != null ? v.toFixed(0) + "%" : "—"), get: (r) => (r.ok && r.agg ? r.agg.ccPct : null) },
+];
+
 // ======================= VISTA 1c — Sala de control (mapa de calor) =======================
 function VistaSala({ ctx }) {
-  const { rankedByRoas, HEAT_MONTHS, totals, alerts, feed, thresholds, isMobile, linkFor } = ctx;
+  const { rows, rankedByRoas, HEAT_MONTHS, totals, alerts, feed, thresholds, isMobile, linkFor } = ctx;
+  const [rankKey, setRankKey] = useState("roas");
   const maxRoas = Math.max(1, ...rankedByRoas.filter((r) => r.roas != null).map((r) => r.roas));
 
   const heatRows = rankedByRoas.filter((r) => r.ok);
 
+  const metric = RANKING_METRICS.find((m) => m.key === rankKey) || RANKING_METRICS[0];
+  // Ranking ordenado por la métrica elegida (siempre entre cuentas con datos) -- las cuentas
+  // sin valor para esa métrica (p.ej. sin citas aún) van al final, nunca ocultas.
+  const rankedByMetric = useMemo(() => {
+    return rows.filter((r) => r.ok).slice().sort((a, b) => {
+      const va = metric.get(a), vb = metric.get(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      return vb - va;
+    });
+  }, [rows, rankKey]);
+
   const Ranking = (
     <div style={styles.salaCol}>
-      <div style={styles.salaLabel}>RANKING POR ROAS</div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
-        {heatRows.map((r) => (
-          <div key={r.key} className="odv-dark-row" style={{ padding: "2px 4px", borderRadius: 6 }} onClick={() => { window.location.href = linkFor(r.key); }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-              <span style={styles.salaClientName}>{r.name}</span>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600, color: DARK_COLORS[r.status] }}>
-                {r.roas != null ? r.roas.toFixed(1).replace(".", ",") + "×" : "—"}
-              </span>
-            </div>
-            <div style={styles.salaRankTrack}>
-              <div style={{ height: 4, borderRadius: 2, background: DARK_COLORS[r.status], width: (r.roas != null ? (r.roas / maxRoas) * 100 : 0) + "%" }} />
-            </div>
-          </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+        <div style={{ ...styles.salaLabel, marginBottom: 0 }}>RANKING POR {metric.label.toUpperCase()}</div>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+        {RANKING_METRICS.map((m) => (
+          <button
+            key={m.key}
+            className="odv-pill"
+            style={rankKey === m.key ? styles.salaPillActive : styles.salaPill}
+            onClick={() => setRankKey(m.key)}
+          >
+            {m.label}
+          </button>
         ))}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+        {rankedByMetric.map((r) => {
+          const v = metric.get(r);
+          // El punto de color siempre refleja el semáforo por ROAS (único umbral configurable
+          // que existe hoy), aunque se esté rankeando por otra métrica.
+          const width = metric.key === "roas" ? (v != null ? (v / maxRoas) * 100 : 0) : Math.min(100, v || 0);
+          return (
+            <div key={r.key} className="odv-dark-row" style={{ padding: "2px 4px", borderRadius: 6 }} onClick={() => { window.location.href = linkFor(r.key); }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                <span style={styles.salaClientName}>{r.name}</span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600, color: DARK_COLORS[r.status] }}>
+                  {metric.fmt(v)}
+                </span>
+              </div>
+              <div style={styles.salaRankTrack}>
+                <div style={{ height: 4, borderRadius: 2, background: DARK_COLORS[r.status], width: width + "%" }} />
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -973,6 +1056,8 @@ const styles = {
   salaCol: { background: "#0B1F1D", padding: "18px 20px" },
   salaLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.08em", color: "#6E8C88", marginBottom: 14 },
   salaClientName: { fontSize: 12.5, color: "#C9D8D5", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" },
+  salaPill: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "5px 10px", borderRadius: 999, border: "1px solid #1D3B38", background: "transparent", color: "#9FB7B3", cursor: "pointer" },
+  salaPillActive: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "5px 10px", borderRadius: 999, border: "1px solid #4FBFAE", background: "#123330", color: "#4FBFAE", cursor: "pointer" },
   salaRankTrack: { height: 4, background: "#152E2B", borderRadius: 2, marginTop: 5 },
   salaAlertCard: { background: "#122B28", border: "1px solid #1D3B38", borderLeft: "3px solid", borderRadius: 8, padding: "11px 13px" },
   salaFooter: { padding: "12px 26px", borderTop: "1px solid #1D3B38", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#6E8C88" },
