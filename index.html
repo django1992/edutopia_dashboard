@@ -583,7 +583,12 @@ function Dashboard() {
             {FUNNEL_STAGES.map((s, i) => {
               const val = funnelValues[s.key];
               const width = Math.max(8, (val / funnelMax) * 100);
-              const prevVal = i === 0 ? val : funnelValues[FUNNEL_STAGES[i - 1].key];
+              // La etapa "Asistencias" se calcula contra las citas YA TRANSCURRIDAS
+              // (data.citasPasadas, hasta ayer) en vez de todas las citas del rango -- si no,
+              // las citas ya agendadas para días futuros del mes inflan el denominador y el %
+              // baja de forma artificial mientras el mes sigue corriendo (mismo criterio que
+              // agg.asisPct en lib/aggregate.js). El resto de las etapas no se toca.
+              const prevVal = i === 0 ? val : (s.key === "asistencias" ? data.citasPasadas : funnelValues[FUNNEL_STAGES[i - 1].key]);
               const convPctNum = prevVal ? (val / prevVal) * 100 : 100;
               const convPct = i === 0 ? 100 : convPctNum.toFixed(0);
               const color = i === 0 ? PCT_COLORS.verde : pctColor(convPctNum, s.thresholds);
