@@ -245,21 +245,21 @@ const FALLBACK_DAILY = [
 
 const FUNNEL_STAGES = [
   { key: "cmi", label: "Conversaciones" },
-  // thresholds: [limite_rojo, limite_amarillo] sobre el % de conversión respecto a la etapa anterior.
-  // <= rojo  => rojo;  entre rojo y amarillo => amarillo;  > amarillo => verde.
-  { key: "agendas", label: "Agendas", thresholds: [5, 10] },
+  // thresholdKey: qué umbral compartido (de cartera.html, ver lib/aggregate.js) rige el color
+  // de conversión de esta etapa. Sin thresholdKey => color neutro (no aplica semáforo).
+  { key: "agendas", label: "Agendas", thresholdKey: "scr" },
   { key: "citas", label: "Citas" },
-  { key: "asistencias", label: "Asistencias", thresholds: [25, 50] },
-  { key: "cierres", label: "Cierres", thresholds: [35, 55] },
+  { key: "asistencias", label: "Asistencias", thresholdKey: "asisPct" },
+  { key: "cierres", label: "Cierres", thresholdKey: "ccPct" },
 ];
 
 const PCT_COLORS = { rojo: "#B54A3F", amarillo: "#C9922E", verde: "#0E7C7B" };
-function pctColor(pctValue, thresholds) {
-  if (!thresholds) return PCT_COLORS.verde; // etapas sin umbral: color neutro
-  const [rojoMax, amarilloMax] = thresholds;
-  if (pctValue <= rojoMax) return PCT_COLORS.rojo;
-  if (pctValue <= amarilloMax) return PCT_COLORS.amarillo;
-  return PCT_COLORS.verde;
+const STATUS_TO_PCT_COLOR = { risk: PCT_COLORS.rojo, warn: PCT_COLORS.amarillo, healthy: PCT_COLORS.verde, muted: PCT_COLORS.verde };
+// Delega en el semáforo compartido (classifyThreshold, de lib/aggregate.js) para que el
+// panel individual use exactamente los mismos umbrales que cartera.html.
+function pctColor(pctValue, thresholdPair) {
+  if (!thresholdPair) return PCT_COLORS.verde; // etapas sin umbral: color neutro
+  return STATUS_TO_PCT_COLOR[classifyThreshold(pctValue, thresholdPair)];
 }
 
 function Dashboard() {
@@ -271,6 +271,9 @@ function Dashboard() {
   const [rangeTouched, setRangeTouched] = useState(false);
   const [clients, setClients] = useState([]);
   const [clientKey, setClientKey] = useState(null);
+  // Umbrales compartidos con cartera.html (localStorage) -- este panel solo los lee, se
+  // editan desde el panel "⚙ Umbrales" de la vista de cartera.
+  const [pctThresholds] = useState(() => loadThresholds());
 
   const dailyBounds = useMemo(
     () => ({ first: daily[0].d, last: daily[daily.length - 1].d }),
@@ -591,7 +594,7 @@ function Dashboard() {
               const prevVal = i === 0 ? val : (s.key === "asistencias" ? data.citasPasadas : funnelValues[FUNNEL_STAGES[i - 1].key]);
               const convPctNum = prevVal ? (val / prevVal) * 100 : 100;
               const convPct = i === 0 ? 100 : convPctNum.toFixed(0);
-              const color = i === 0 ? PCT_COLORS.verde : pctColor(convPctNum, s.thresholds);
+              const color = i === 0 ? PCT_COLORS.verde : pctColor(convPctNum, s.thresholdKey ? pctThresholds[s.thresholdKey] : null);
               return (
                 <div key={s.key} style={styles.funnelRow}>
                   <div style={styles.funnelLabelCol}>
