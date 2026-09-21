@@ -23,11 +23,11 @@
 
 const { useState, useEffect, useMemo } = React;
 
-// ---- Umbrales de semáforo por defecto (editables desde la propia página, se guardan en
-// localStorage -- ver README del handoff: "deben ser configurables, no hardcodeados"). ----
-const DEFAULT_THRESHOLDS = { risk: 5, warn: 8 };
+// ---- Umbrales de semáforo, uno por métrica (ROAS, Agendamiento, Asistencia, Cierre) --
+// editables desde la propia página, se guardan en localStorage y los define/migra/expone
+// lib/aggregate.js (DEFAULT_THRESHOLDS, loadThresholds, saveThresholds, classifyThreshold)
+// para que index.html use exactamente los mismos valores. ----
 const CACHE_KEY = "cartera:lastPortfolio";
-const THRESHOLDS_KEY = "cartera:thresholds";
 const VIEW_KEY = "cartera:view";
 const REFRESH_MS = 5 * 60 * 1000;
 
@@ -39,12 +39,13 @@ const VIEWS = [
   { key: "tarjetas", label: "Tarjetas" },
 ];
 
-function classify(roas, thresholds) {
-  if (roas === null || roas === undefined) return "muted";
-  if (roas < thresholds.risk) return "risk";
-  if (roas < thresholds.warn) return "warn";
-  return "healthy";
-}
+// Metadatos del panel "⚙ Umbrales": un grupo de 2 campos (riesgo/atención) por métrica.
+const THRESHOLD_METRICS = [
+  { key: "roas", label: "Rentabilidad (ROAS)", unit: "×", step: "0.5" },
+  { key: "scr", label: "Agendamiento", unit: "%", step: "1" },
+  { key: "asisPct", label: "Asistencia", unit: "%", step: "1" },
+  { key: "ccPct", label: "Cierre", unit: "%", step: "1" },
+];
 
 // Color de celda del mapa de calor (vista "Sala de control"): un cuarto escalón "alto" además
 // de los 3 semáforo normales, para distinguir cuentas excelentes de simplemente sanas.
@@ -89,7 +90,7 @@ function Cartera() {
   const [portfolio, setPortfolio] = useState(() => loadCache(CACHE_KEY, { clients: [], syncedAt: null }));
   const [status, setStatus] = useState(() => (loadCache(CACHE_KEY, null) ? "cached-initial" : "loading"));
   const [errorMsg, setErrorMsg] = useState(null);
-  const [thresholds, setThresholds] = useState(() => loadCache(THRESHOLDS_KEY, DEFAULT_THRESHOLDS));
+  const [thresholds, setThresholds] = useState(() => loadThresholds());
   const [showThresholds, setShowThresholds] = useState(false);
   const [query, setQuery] = useState("");
   const [sortBy, setSortBy] = useState({ col: "roas", dir: "desc" });
@@ -99,7 +100,7 @@ function Cartera() {
   const [cardFilter, setCardFilter] = useState("todos");
   const isMobile = useIsMobile(760);
 
-  useEffect(() => { saveCache(THRESHOLDS_KEY, thresholds); }, [thresholds]);
+  useEffect(() => { saveThresholds(thresholds); }, [thresholds]);
   useEffect(() => { saveCache(VIEW_KEY, view); }, [view]);
 
   const fetchLive = () => {
@@ -199,7 +200,7 @@ function Cartera() {
         key: c.key, name: c.name, city: c.city, ok, daily,
         agg, lastAgg, prevAgg, roas, deltaPct, series,
         error: c.error || null,
-        status: ok ? classify(roas, thresholds) : "muted",
+        status: ok ? classifyThreshold(roas, thresholds.roas) : "muted",
       };
     });
   }, [clients, range, thresholds]);
@@ -227,18 +228,32 @@ function Cartera() {
 
       if (
         r.lastAgg && r.prevAgg && r.lastAgg.roas != null && r.prevAgg.roas != null &&
-        r.lastAgg.roas < thresholds.risk && r.prevAgg.roas < thresholds.risk
+        r.lastAgg.roas < thresholds.roas.risk && r.prevAgg.roas < thresholds.roas.risk
       ) {
         out.push({
           id: r.key + "-roas2", name: r.name, color: COLORS.risk,
-          text: `ROAS ${r.lastAgg.roas.toFixed(1).replace(".", ",")}× · segundo mes seguido bajo ${thresholds.risk}×`,
+          text: `ROAS ${r.lastAgg.roas.toFixed(1).replace(".", ",")}× · segundo mes seguido bajo ${thresholds.roas.risk}×`,
         });
       }
 
-      if (r.agg && r.agg.asisPct != null && r.agg.asisPct < 50) {
+      if (r.agg && r.agg.asisPct != null && r.agg.asisPct < thresholds.asisPct.risk) {
         out.push({
           id: r.key + "-asis", name: r.name, color: COLORS.risk,
-          text: `Asistencia ${r.agg.asisPct.toFixed(0)}% en el periodo activo`,
+          text: `Asistencia ${r.agg.asisPct.toFixed(0)}% en el periodo activo (bajo ${thresholds.asisPct.risk}%)`,
+        });
+      }
+
+      if (r.agg && r.agg.scr != null && r.agg.scr < thresholds.scr.risk) {
+        out.push({
+          id: r.key + "-scr", name: r.name, color: COLORS.risk,
+          text: `Agendamiento ${r.agg.scr.toFixed(0)}% en el periodo activo (bajo ${thresholds.scr.risk}%)`,
+        });
+      }
+
+      if (r.agg && r.agg.ccPct != null && r.agg.ccPct < thresholds.ccPct.risk) {
+        out.push({
+          id: r.key + "-cc", name: r.name, color: COLORS.risk,
+          text: `Cierre ${r.agg.ccPct.toFixed(0)}% en el periodo activo (bajo ${thresholds.ccPct.risk}%)`,
         });
       }
 
@@ -412,23 +427,30 @@ function Cartera() {
 
       {showThresholds && (
         <div style={isDark ? styles.thresholdsPanelDark : styles.thresholdsPanel} className="odv-fade">
-          <span style={isDark ? styles.thresholdsLabelDark : styles.thresholdsLabel}>Umbrales de semáforo (se guardan en este navegador):</span>
-          <label style={styles.thresholdsField}>
-            Riesgo bajo
-            <input
-              type="number" step="0.5" min="0" value={thresholds.risk}
-              style={styles.thresholdsInput}
-              onChange={(e) => setThresholds((t) => ({ ...t, risk: Number(e.target.value) }))}
-            /> ×
-          </label>
-          <label style={styles.thresholdsField}>
-            Atención bajo
-            <input
-              type="number" step="0.5" min="0" value={thresholds.warn}
-              style={styles.thresholdsInput}
-              onChange={(e) => setThresholds((t) => ({ ...t, warn: Number(e.target.value) }))}
-            /> ×
-          </label>
+          <span style={isDark ? styles.thresholdsLabelDark : styles.thresholdsLabel}>Umbrales de semáforo por métrica (se guardan en este navegador y los usa también el panel individual de cada cliente):</span>
+          <div style={styles.thresholdsGrid}>
+            {THRESHOLD_METRICS.map((m) => (
+              <div key={m.key} style={styles.thresholdsGroup}>
+                <div style={isDark ? { ...styles.thresholdsGroupTitle, color: "#C9D8D5" } : styles.thresholdsGroupTitle}>{m.label}</div>
+                <label style={styles.thresholdsField}>
+                  Riesgo bajo
+                  <input
+                    type="number" step={m.step} min="0" value={thresholds[m.key].risk}
+                    style={styles.thresholdsInput}
+                    onChange={(e) => setThresholds((t) => ({ ...t, [m.key]: { ...t[m.key], risk: Number(e.target.value) } }))}
+                  /> {m.unit}
+                </label>
+                <label style={styles.thresholdsField}>
+                  Atención bajo
+                  <input
+                    type="number" step={m.step} min="0" value={thresholds[m.key].warn}
+                    style={styles.thresholdsInput}
+                    onChange={(e) => setThresholds((t) => ({ ...t, [m.key]: { ...t[m.key], warn: Number(e.target.value) } }))}
+                  /> {m.unit}
+                </label>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -569,7 +591,7 @@ function VistaTabla({ ctx }) {
           accent="coral"
           sub={totals.cac != null ? "CAC " + k1(totals.cac) : "sin inversión"}
         />
-        <KpiCard label="Cuentas en riesgo" value={nRiesgo} accent="amber" sub={`ROAS bajo ${thresholds.risk}×`} />
+        <KpiCard label="Cuentas en riesgo" value={nRiesgo} accent="amber" sub={`ROAS bajo ${thresholds.roas.risk}×`} />
       </section>
 
       <section style={styles.panel} className="odv-fade">
@@ -624,11 +646,23 @@ function VistaTabla({ ctx }) {
                       <td style={styles.td}>{cellMoney(r, r.agg && r.agg.recoleccion)}</td>
                       <td style={styles.td}>{cellNum(r, r.agg && r.agg.cmi)}</td>
                       <td style={styles.td}>{cellNum(r, r.agg && r.agg.agendas)}</td>
-                      <td style={styles.td}>{r.ok && r.agg && r.agg.scr != null ? r.agg.scr.toFixed(0) + "%" : "—"}</td>
+                      <td style={styles.td}>
+                        {r.ok && r.agg && r.agg.scr != null
+                          ? <span style={{ color: COLORS[classifyThreshold(r.agg.scr, thresholds.scr)] }}>{r.agg.scr.toFixed(0) + "%"}</span>
+                          : "—"}
+                      </td>
                       <td style={styles.td}>{cellNum(r, r.agg && r.agg.asistencias)}</td>
-                      <td style={styles.td}>{r.ok && r.agg && r.agg.asisPct != null ? r.agg.asisPct.toFixed(0) + "%" : "—"}</td>
+                      <td style={styles.td}>
+                        {r.ok && r.agg && r.agg.asisPct != null
+                          ? <span style={{ color: COLORS[classifyThreshold(r.agg.asisPct, thresholds.asisPct)] }}>{r.agg.asisPct.toFixed(0) + "%"}</span>
+                          : "—"}
+                      </td>
                       <td style={styles.td}>{cellNum(r, r.agg && r.agg.cierres)}</td>
-                      <td style={styles.td}>{r.ok && r.agg && r.agg.ccPct != null ? r.agg.ccPct.toFixed(0) + "%" : "—"}</td>
+                      <td style={styles.td}>
+                        {r.ok && r.agg && r.agg.ccPct != null
+                          ? <span style={{ color: COLORS[classifyThreshold(r.agg.ccPct, thresholds.ccPct)] }}>{r.agg.ccPct.toFixed(0) + "%"}</span>
+                          : "—"}
+                      </td>
                       <td style={styles.td}>{r.ok && r.agg && r.agg.cac != null ? k1(r.agg.cac) : "—"}</td>
                       <td style={styles.td}>
                         <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 26 }}>
@@ -637,7 +671,7 @@ function VistaTabla({ ctx }) {
                               key={i}
                               style={{
                                 width: 7, borderRadius: 1.5,
-                                background: v == null ? "#EEF3F2" : COLORS[classify(v, thresholds)],
+                                background: v == null ? "#EEF3F2" : COLORS[classifyThreshold(v, thresholds.roas)],
                                 height: Math.max(3, v == null ? 3 : (v / maxSeries) * 26),
                               }}
                             />
@@ -663,11 +697,11 @@ function VistaTabla({ ctx }) {
                   <td style={styles.tdTotalNum}>{k1(totals.fac)}</td>
                   <td style={styles.tdTotalNum}>{num2(totals.cmi)}</td>
                   <td style={styles.tdTotalNum}>{num2(totals.ag)}</td>
-                  <td style={styles.tdTotalNum}>{totals.scr != null ? totals.scr.toFixed(0) + "%" : "—"}</td>
+                  <td style={{ ...styles.tdTotalNum, color: totals.scr != null ? COLORS[classifyThreshold(totals.scr, thresholds.scr)] : "#0B1F1D" }}>{totals.scr != null ? totals.scr.toFixed(0) + "%" : "—"}</td>
                   <td style={styles.tdTotalNum}>{num2(totals.asi)}</td>
-                  <td style={styles.tdTotalNum}>{totals.asisPct != null ? totals.asisPct.toFixed(0) + "%" : "—"}</td>
+                  <td style={{ ...styles.tdTotalNum, color: totals.asisPct != null ? COLORS[classifyThreshold(totals.asisPct, thresholds.asisPct)] : "#0B1F1D" }}>{totals.asisPct != null ? totals.asisPct.toFixed(0) + "%" : "—"}</td>
                   <td style={styles.tdTotalNum}>{num2(totals.cie)}</td>
-                  <td style={styles.tdTotalNum}>{totals.cc != null ? totals.cc.toFixed(0) + "%" : "—"}</td>
+                  <td style={{ ...styles.tdTotalNum, color: totals.cc != null ? COLORS[classifyThreshold(totals.cc, thresholds.ccPct)] : "#0B1F1D" }}>{totals.cc != null ? totals.cc.toFixed(0) + "%" : "—"}</td>
                   <td style={styles.tdTotalNum}>{totals.cac != null ? k1(totals.cac) : "—"}</td>
                   <td style={styles.tdTotal}></td>
                   <td style={{ ...styles.tdTotalNum, color: "#0E7C7B" }}>
@@ -701,8 +735,20 @@ function VistaTabla({ ctx }) {
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: "#5B6E6B" }}>
                   <span>CMI {cellNum(r, r.agg && r.agg.cmi)}</span>
-                  <span>Ag. {cellNum(r, r.agg && r.agg.agendas)} ({r.ok && r.agg && r.agg.scr != null ? r.agg.scr.toFixed(0) + "%" : "—"})</span>
-                  <span>Asis. {cellNum(r, r.agg && r.agg.asistencias)} ({r.ok && r.agg && r.agg.asisPct != null ? r.agg.asisPct.toFixed(0) + "%" : "—"})</span>
+                  <span>
+                    Ag. {cellNum(r, r.agg && r.agg.agendas)} (
+                    {r.ok && r.agg && r.agg.scr != null
+                      ? <span style={{ color: COLORS[classifyThreshold(r.agg.scr, thresholds.scr)] }}>{r.agg.scr.toFixed(0) + "%"}</span>
+                      : "—"}
+                    )
+                  </span>
+                  <span>
+                    Asis. {cellNum(r, r.agg && r.agg.asistencias)} (
+                    {r.ok && r.agg && r.agg.asisPct != null
+                      ? <span style={{ color: COLORS[classifyThreshold(r.agg.asisPct, thresholds.asisPct)] }}>{r.agg.asisPct.toFixed(0) + "%"}</span>
+                      : "—"}
+                    )
+                  </span>
                 </div>
               </div>
             ))}
@@ -723,7 +769,7 @@ function VistaTabla({ ctx }) {
 
 // ======================= VISTA 1b — Tarjetas (semáforo) =======================
 function VistaTarjetas({ ctx }) {
-  const { rankedByRoas, alerts, nRiesgo, nAtencion, nSanos, cardFilter, setCardFilter, linkFor } = ctx;
+  const { rankedByRoas, alerts, nRiesgo, nAtencion, nSanos, cardFilter, setCardFilter, linkFor, thresholds } = ctx;
 
   const FILTERS = [
     { key: "todos", label: `Todos · ${rankedByRoas.length}`, color: "#0E7C7B" },
@@ -763,6 +809,9 @@ function VistaTarjetas({ ctx }) {
           const agg = r.agg || {};
           const asisPct = r.ok && agg.asisPct != null ? agg.asisPct : null;
           const ccPct = r.ok && agg.ccPct != null ? agg.ccPct : null;
+          const scrColor = r.ok && agg.scr != null ? COLORS[classifyThreshold(agg.scr, thresholds.scr)] : "#4C7EA6";
+          const asisColor = asisPct != null ? COLORS[classifyThreshold(asisPct, thresholds.asisPct)] : "#0E7C7B";
+          const ccColor = ccPct != null ? COLORS[classifyThreshold(ccPct, thresholds.ccPct)] : "#3FA796";
           return (
             <div key={r.key} className="odv-card" style={styles.tCard} onClick={() => { window.location.href = linkFor(r.key); }}>
               <div style={{ ...styles.tCardBar, background: COLORS[r.status] }} />
@@ -787,17 +836,17 @@ function VistaTarjetas({ ctx }) {
               <div style={styles.tBarCaption}><span>CMI</span><span>{r.ok && agg.cmi != null ? num2(agg.cmi) : "—"}</span></div>
 
               <div style={styles.tBarTrack}>
-                <div style={{ ...styles.tBarFill, width: (r.ok && agg.agendas != null ? Math.min(100, (agg.agendas / maxAgendas) * 100) : 0) + "%", background: "#4C7EA6" }} />
+                <div style={{ ...styles.tBarFill, width: (r.ok && agg.agendas != null ? Math.min(100, (agg.agendas / maxAgendas) * 100) : 0) + "%", background: scrColor }} />
               </div>
               <div style={styles.tBarCaption}><span>Agendas</span><span>{r.ok && agg.agendas != null ? num2(agg.agendas) : "—"}</span></div>
 
               <div style={styles.tBarTrack}>
-                <div style={{ ...styles.tBarFill, width: (asisPct != null ? Math.min(100, asisPct) : 0) + "%", background: "#0E7C7B" }} />
+                <div style={{ ...styles.tBarFill, width: (asisPct != null ? Math.min(100, asisPct) : 0) + "%", background: asisColor }} />
               </div>
               <div style={styles.tBarCaption}><span>Asistencia</span><span>{asisPct != null ? asisPct.toFixed(0) + "%" : "—"}</span></div>
 
               <div style={styles.tBarTrack}>
-                <div style={{ ...styles.tBarFill, width: (ccPct != null ? Math.min(100, ccPct) : 0) + "%", background: "#3FA796" }} />
+                <div style={{ ...styles.tBarFill, width: (ccPct != null ? Math.min(100, ccPct) : 0) + "%", background: ccColor }} />
               </div>
               <div style={styles.tBarCaption}><span>Cierre</span><span>{ccPct != null ? ccPct.toFixed(0) + "%" : "—"}</span></div>
 
@@ -880,19 +929,20 @@ function VistaSala({ ctx }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
         {rankedByMetric.map((r) => {
           const v = metric.get(r);
-          // El punto de color siempre refleja el semáforo por ROAS (único umbral configurable
-          // que existe hoy), aunque se esté rankeando por otra métrica.
+          // El color refleja el semáforo de la métrica actualmente seleccionada en el ranking
+          // (cada una con su propio umbral configurable), no siempre el de ROAS.
+          const status = classifyThreshold(v, thresholds[metric.key]);
           const width = metric.key === "roas" ? (v != null ? (v / maxRoas) * 100 : 0) : Math.min(100, v || 0);
           return (
             <div key={r.key} className="odv-dark-row" style={{ padding: "2px 4px", borderRadius: 6 }} onClick={() => { window.location.href = linkFor(r.key); }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
                 <span style={styles.salaClientName}>{r.name}</span>
-                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600, color: DARK_COLORS[r.status] }}>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600, color: DARK_COLORS[status] }}>
                   {metric.fmt(v)}
                 </span>
               </div>
               <div style={styles.salaRankTrack}>
-                <div style={{ height: 4, borderRadius: 2, background: DARK_COLORS[r.status], width: width + "%" }} />
+                <div style={{ height: 4, borderRadius: 2, background: DARK_COLORS[status], width: width + "%" }} />
               </div>
             </div>
           );
@@ -927,7 +977,7 @@ function VistaSala({ ctx }) {
             {HEAT_MONTHS.map((m) => {
               const hasAny = r.daily.some((d) => d.d >= m.start && d.d <= m.end);
               const v = hasAny ? aggregateExact(r.daily, m.start, m.end).roas : null;
-              const c = heatColor(v, thresholds);
+              const c = heatColor(v, thresholds.roas);
               return (
                 <div key={m.key} style={{ height: 30, borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600, color: c.ink, background: c.bg }}>
                   {v != null ? v.toFixed(1).replace(".", ",") : "—"}
@@ -1011,6 +1061,9 @@ const styles = {
   thresholdsPanelDark: { display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", background: "#122B28", border: "1px solid #1D3B38", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "#9FB7B3" },
   thresholdsLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.04em" },
   thresholdsLabelDark: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.04em", color: "#9FB7B3" },
+  thresholdsGrid: { display: "flex", flexWrap: "wrap", gap: "16px 28px", width: "100%" },
+  thresholdsGroup: { display: "flex", flexDirection: "column", gap: 8 },
+  thresholdsGroupTitle: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.04em", color: "#0E7C7B", fontWeight: 600 },
   thresholdsField: { display: "flex", alignItems: "center", gap: 6 },
   thresholdsInput: { width: 56, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, padding: "5px 8px", borderRadius: 6, border: "1px solid #DCE4E2" },
   alertsStrip: { background: "#FDF6E9", border: "1px solid #EBD8AE", borderRadius: 12, padding: "14px 18px", display: "flex", flexWrap: "wrap", gap: 22, alignItems: "center", marginBottom: 22 },
