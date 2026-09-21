@@ -338,6 +338,11 @@ function Cartera() {
     const asi = sum((a) => a.asistencias);
     const cmi = sum((a) => a.cmi);
     const citas = sum((a) => a.citas);
+    // Para el % de asistencia del total usamos las bases ya acotadas a "hasta ayer" que
+    // devuelve aggregateExact -- sumar `citas`/`asistencias` completos volvería a contar
+    // citas agendadas a futuro que todavía no pudieron confirmarse como asistencia.
+    const citasPasadas = sum((a) => a.citasPasadas);
+    const asistenciasPasadas = sum((a) => a.asistenciasPasadas);
     return {
       inv, fac, ven, cie, ag, asi, cmi, citas,
       roas: inv ? fac / inv : null,
@@ -345,8 +350,8 @@ function Cartera() {
       cc: asi ? (cie / asi) * 100 : null,
       // % de agendamiento = agendas sobre CMI (conversaciones), igual que agg.scr por cliente.
       scr: cmi ? (ag / cmi) * 100 : null,
-      // % de asistencias = asistencias sobre citas, igual que agg.asisPct por cliente.
-      asisPct: citas ? (asi / citas) * 100 : null,
+      // % de asistencias = asistencias sobre citas ya transcurridas, igual que agg.asisPct.
+      asisPct: citasPasadas ? (asistenciasPasadas / citasPasadas) * 100 : null,
     };
   }, [rows]);
 
