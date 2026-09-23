@@ -197,11 +197,48 @@ function Cartera() {
       const last6 = months.slice(-6);
       const series = last6.map((m) => aggregateExact(daily, m.start, m.end).roas);
 
+      // ---- Salud de los datos (independiente del semáforo de performance) ----
+      // 1) Tracker desactualizado: hace cuántos días no llega una fila nueva.
+      const lastRowDate = daily.length ? daily[daily.length - 1].d : null;
+      const staleDays = lastRowDate
+        ? Math.floor((Date.now() - new Date(lastRowDate + "T00:00:00").getTime()) / 86400000)
+        : null;
+      const staleStatus = staleDays == null ? null : staleDays >= 5 ? "risk" : staleDays >= 3 ? "warn" : null;
+
+      // 2) Datos sospechosos: comparados contra el mes calendario anterior (normalizado por
+      // día para no penalizar un mes en curso todavía parcial) -- "agendas"/"asistencias"/
+      // "cierres" muy por debajo de lo usual, o muchas conversaciones sin ningún agendamiento.
+      const dailyRate = (aggMonth, m, key) => {
+        if (!aggMonth || !m) return null;
+        const effEnd = m.end < yesterdayISO() ? m.end : yesterdayISO();
+        if (effEnd < m.start) return null;
+        const days = daysBetweenISO(m.start, effEnd);
+        return days > 0 ? aggMonth[key] / days : null;
+      };
+      const anomalies = [];
+      if (ok && lastAgg && lastAgg.cmi >= 10 && lastAgg.agendas === 0) {
+        anomalies.push({ key: "scr0", label: "muchas conversaciones sin agendar" });
+      }
+      if (ok && lastAgg && prevAgg && lastM && prevM) {
+        [
+          { key: "ag", metric: "agendas", label: "agendas por debajo de lo usual" },
+          { key: "asi", metric: "asistencias", label: "asistencia por debajo de lo usual" },
+          { key: "cie", metric: "cierres", label: "cierres/ventas por debajo de lo usual" },
+        ].forEach((c) => {
+          const lastRate = dailyRate(lastAgg, lastM, c.metric);
+          const prevRate = dailyRate(prevAgg, prevM, c.metric);
+          if (lastRate != null && prevRate != null && prevRate > 0 && lastRate < prevRate * 0.5) {
+            anomalies.push({ key: c.key, label: c.label });
+          }
+        });
+      }
+
       return {
         key: c.key, name: c.name, city: c.city, ok, daily,
         agg, lastAgg, prevAgg, roas, deltaPct, series,
         error: c.error || null,
         status: ok ? classifyThreshold(roas, thresholds.roas) : "muted",
+        staleStatus, staleDays, anomalies,
       };
     });
   }, [clients, range, thresholds]);
@@ -280,12 +317,17 @@ function Cartera() {
         }
       }
 
-      const lastDate = r.daily[r.daily.length - 1].d;
-      const daysSince = Math.floor((Date.now() - new Date(lastDate + "T00:00:00").getTime()) / 86400000);
-      if (daysSince > 2) {
+      if (r.staleStatus) {
         out.push({
-          id: r.key + "-sync", name: r.name, color: COLORS.warn,
-          text: `Sin datos nuevos hace ${daysSince} días (sincronización, no rendimiento)`,
+          id: r.key + "-stale", name: r.name, color: r.staleStatus === "risk" ? COLORS.risk : COLORS.warn,
+          text: `Tracker sin actualizar hace ${r.staleDays} días (sincronización, no rendimiento)`,
+        });
+      }
+
+      if (r.anomalies && r.anomalies.length) {
+        out.push({
+          id: r.key + "-anom", name: r.name, color: COLORS.warn,
+          text: `Datos atípicos: ${r.anomalies.map((a) => a.label).join(", ")} (vs. mes anterior)`,
         });
       }
     });
@@ -571,6 +613,47 @@ function AlertsStrip({ alerts }) {
   );
 }
 
+// Icono compacto de "salud de los datos" (independiente del semáforo de performance): tracker
+// desactualizado (⏱, amarillo desde 3 días / rojo desde 5) o datos atípicos vs. el mes anterior
+// (🚩). Se usa junto al nombre del cliente en Tabla -- el detalle completo va en el title (hover).
+function DataHealthIcon({ r }) {
+  const hasStale = !!r.staleStatus;
+  const hasAnom = r.anomalies && r.anomalies.length > 0;
+  if (!hasStale && !hasAnom) return null;
+  const parts = [];
+  if (hasStale) parts.push(`Tracker sin actualizar hace ${r.staleDays} días`);
+  if (hasAnom) parts.push(`Datos atípicos: ${r.anomalies.map((a) => a.label).join(", ")} (vs. mes anterior)`);
+  return (
+    <span
+      title={parts.join(" · ")}
+      style={{ marginLeft: 6, fontSize: 12, cursor: "help", color: hasStale ? (r.staleStatus === "risk" ? COLORS.risk : COLORS.warn) : COLORS.warn }}
+    >
+      {hasStale ? "⏱" : "🚩"}
+    </span>
+  );
+}
+
+// Badges completos (con texto) para la vista Tarjetas, donde hay más espacio que en la tabla.
+function DataHealthBadges({ r }) {
+  const hasStale = !!r.staleStatus;
+  const hasAnom = r.anomalies && r.anomalies.length > 0;
+  if (!hasStale && !hasAnom) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+      {hasStale && (
+        <span style={{ ...styles.dataBadge, background: r.staleStatus === "risk" ? "#F6E4E1" : "#FBF0DD", color: r.staleStatus === "risk" ? "#B54A3F" : "#8A6B22" }}>
+          ⏱ Sin actualizar {r.staleDays}d
+        </span>
+      )}
+      {hasAnom && (
+        <span style={{ ...styles.dataBadge, background: "#FBF0DD", color: "#8A6B22" }} title={r.anomalies.map((a) => a.label).join(", ")}>
+          🚩 Datos atípicos
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ======================= VISTA 1a — Tabla ordenable =======================
 function VistaTabla({ ctx }) {
   const {
@@ -638,7 +721,7 @@ function VistaTabla({ ctx }) {
                         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                           <span style={{ width: 7, height: 7, borderRadius: "50%", flex: "none", background: COLORS[r.status] }} />
                           <div>
-                            <div style={{ fontWeight: 600, color: "#0B1F1D" }}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}</div>
+                            <div style={{ fontWeight: 600, color: "#0B1F1D" }}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}<DataHealthIcon r={r} /></div>
                             {r.city && <div style={{ fontSize: 11.5, color: "#8AA19E" }}>{r.city}</div>}
                           </div>
                         </div>
@@ -720,7 +803,7 @@ function VistaTabla({ ctx }) {
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ width: 7, height: 7, borderRadius: "50%", flex: "none", background: COLORS[r.status] }} />
                     <div>
-                      <div style={{ fontWeight: 600, color: "#0B1F1D" }}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}</div>
+                      <div style={{ fontWeight: 600, color: "#0B1F1D" }}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}<DataHealthIcon r={r} /></div>
                       {r.city && <div style={{ fontSize: 11.5, color: "#8AA19E" }}>{r.city}</div>}
                     </div>
                   </div>
@@ -820,6 +903,7 @@ function VistaTarjetas({ ctx }) {
                 <div>
                   <div style={styles.tCardName}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}</div>
                   {r.city && <div style={{ fontSize: 11.5, color: "#8AA19E", marginTop: 2 }}>{r.city}</div>}
+                  <DataHealthBadges r={r} />
                 </div>
                 <div style={{ textAlign: "right" }}>
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 24, fontWeight: 600, lineHeight: 1, color: COLORS[r.status] }}>
@@ -1089,6 +1173,7 @@ const styles = {
   tdTotal: { padding: "13px 10px", borderTop: "2px solid #DCE4E2", fontWeight: 600, color: "#0B1F1D" },
   tdTotalNum: { padding: "13px 10px", borderTop: "2px solid #DCE4E2", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: "#0B1F1D" },
   sinDatos: { fontWeight: 400, color: "#8AA19E" },
+  dataBadge: { fontSize: 10.5, fontWeight: 600, padding: "3px 9px", borderRadius: 999, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" },
   mobileList: { display: "flex", flexDirection: "column", gap: 10 },
   mobileCard: { background: "#fff", border: "1px solid #E1E8E6", borderRadius: 12, padding: "14px 16px", cursor: "pointer" },
   footnote: { fontSize: 11.5, color: "#8AA19E", marginTop: 14 },
