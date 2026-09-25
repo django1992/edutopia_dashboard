@@ -272,6 +272,7 @@ function Dashboard() {
   const [rangeTouched, setRangeTouched] = useState(false);
   const [clients, setClients] = useState([]);
   const [clientKey, setClientKey] = useState(null);
+  const [trackerUrl, setTrackerUrl] = useState(null);
   // Umbrales compartidos con cartera.html (localStorage) -- este panel solo los lee, se
   // editan desde el panel "⚙ Umbrales" de la vista de cartera.
   const [pctThresholds] = useState(() => loadThresholds());
@@ -299,6 +300,7 @@ function Dashboard() {
           setLastSync(json.syncedAt);
           setErrorMsg(null);
           if (json.client && json.client.key) setClientKey(json.client.key);
+          setTrackerUrl((json.client && json.client.sheetUrl) || null);
         } else {
           setStatus("cached-error");
           setErrorMsg(json.error || "Respuesta inválida del servidor");
@@ -462,6 +464,17 @@ function Dashboard() {
                   <option key={c.key} value={c.key}>{c.name}</option>
                 ))}
               </select>
+            )}
+            {trackerUrl && (
+              <a
+                href={trackerUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={styles.trackerBtn}
+                title="Abrir el Google Sheets de este cliente en una pestaña nueva"
+              >
+                Ver tracker ↗
+              </a>
             )}
           </div>
           <div style={styles.subtitle}>Funnel completo: inversión publicitaria → agenda → cierre → facturación</div>
@@ -764,6 +777,7 @@ const styles = {
   h1: { fontFamily: "'Space Grotesk', sans-serif", fontSize: "clamp(26px, 4vw, 36px)", fontWeight: 700, margin: 0, color: "#0B1F1D" },
   titleRow: { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" },
   clientSelect: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, padding: "7px 12px", borderRadius: 8, border: "1px solid #DCE4E2", background: "#fff", color: "#0E7C7B", fontWeight: 600, cursor: "pointer", colorScheme: "light" },
+  trackerBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, fontWeight: 600, padding: "7px 12px", borderRadius: 8, border: "1px solid #DCE4E2", background: "#fff", color: "#0E7C7B", textDecoration: "none", whiteSpace: "nowrap" },
   subtitle: { fontSize: 14, color: "#5B6E6B", marginTop: 6 },
   controlsCol: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 },
   statusRow: { display: "flex", alignItems: "center", gap: 14 },
