@@ -51,6 +51,8 @@ module.exports = async (req, res) => {
           ok: true,
           daily,
           ultimaAgenda,
+          // Link directo al Google Sheets del cliente (botón "Ver tracker" en cartera.html).
+          sheetUrl: `https://docs.google.com/spreadsheets/d/${client.sheetId}/edit`,
         };
       })
     );
@@ -64,6 +66,9 @@ module.exports = async (req, res) => {
         ok: false,
         error: String(r.reason && r.reason.message ? r.reason.message : r.reason),
         daily: [],
+        // El link al tracker no depende de que la lectura del Sheets haya funcionado -- sigue
+        // siendo útil para que Humberto vaya a revisar manualmente por qué falló.
+        sheetUrl: `https://docs.google.com/spreadsheets/d/${clients[i].sheetId}/edit`,
       };
     });
 
