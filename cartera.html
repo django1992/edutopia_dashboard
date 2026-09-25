@@ -229,6 +229,7 @@ function Cartera() {
         error: c.error || null,
         status: ok ? classifyThreshold(roas, thresholds.roas) : "muted",
         staleStatus, staleDays, anomalies,
+        sheetUrl: c.sheetUrl || null,
       };
     });
   }, [clients, range, thresholds]);
@@ -641,6 +642,26 @@ function DataHealthBadges({ r }) {
   );
 }
 
+// Botón/enlace compacto para ir directo al Google Sheets (tracker) de un cliente. Se usa junto
+// al nombre en Tabla, Tarjetas y Sala de control -- siempre con stopPropagation, porque toda la
+// fila/tarjeta ya tiene su propio onClick que navega al panel individual del cliente (linkFor);
+// sin esto, un clic en el ícono terminaría llevando a las dos partes a la vez.
+function TrackerLink({ url }) {
+  if (!url) return null;
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      title="Abrir el Google Sheets (tracker) de este cliente en una pestaña nueva"
+      style={{ marginLeft: 6, fontSize: 12, textDecoration: "none" }}
+    >
+      📊
+    </a>
+  );
+}
+
 // ======================= VISTA 1a — Tabla ordenable =======================
 function VistaTabla({ ctx }) {
   const {
@@ -708,7 +729,7 @@ function VistaTabla({ ctx }) {
                         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                           <span style={{ width: 7, height: 7, borderRadius: "50%", flex: "none", background: COLORS[r.status] }} />
                           <div>
-                            <div style={{ fontWeight: 600, color: "#0B1F1D" }}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}<DataHealthIcon r={r} /></div>
+                            <div style={{ fontWeight: 600, color: "#0B1F1D" }}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}<DataHealthIcon r={r} /><TrackerLink url={r.sheetUrl} /></div>
                             {r.city && <div style={{ fontSize: 11.5, color: "#8AA19E" }}>{r.city}</div>}
                           </div>
                         </div>
@@ -790,7 +811,7 @@ function VistaTabla({ ctx }) {
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ width: 7, height: 7, borderRadius: "50%", flex: "none", background: COLORS[r.status] }} />
                     <div>
-                      <div style={{ fontWeight: 600, color: "#0B1F1D" }}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}<DataHealthIcon r={r} /></div>
+                      <div style={{ fontWeight: 600, color: "#0B1F1D" }}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}<DataHealthIcon r={r} /><TrackerLink url={r.sheetUrl} /></div>
                       {r.city && <div style={{ fontSize: 11.5, color: "#8AA19E" }}>{r.city}</div>}
                     </div>
                   </div>
@@ -888,7 +909,7 @@ function VistaTarjetas({ ctx }) {
               <div style={{ ...styles.tCardBar, background: COLORS[r.status] }} />
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
                 <div>
-                  <div style={styles.tCardName}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}</div>
+                  <div style={styles.tCardName}>{r.name}{!r.ok && <span style={styles.sinDatos}> · sin datos</span>}<TrackerLink url={r.sheetUrl} /></div>
                   {r.city && <div style={{ fontSize: 11.5, color: "#8AA19E", marginTop: 2 }}>{r.city}</div>}
                   <DataHealthBadges r={r} />
                 </div>
@@ -1057,6 +1078,7 @@ function VistaSala({ ctx }) {
               <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
                 <span style={styles.salaClientName}>{r.name}</span>
                 <DataHealthIcon r={r} />
+                <TrackerLink url={r.sheetUrl} />
               </div>
               {!hasYesterday ? (
                 <div style={{ fontSize: 11, color: "#6E8C88", marginTop: 10 }}>Sin datos de ayer</div>
