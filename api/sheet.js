@@ -44,7 +44,11 @@ module.exports = async (req, res) => {
 
     res.status(200).json({
       ok: true,
-      client: { key: client.key, name: client.name },
+      // sheetUrl: link directo al Google Sheets de este cliente (para el botón "Ver tracker"
+      // del panel individual). El sheetId en sí no es un secreto -- la hoja solo es accesible
+      // para quien ya tenga permiso de Google (compartida con la cuenta de servicio y con
+      // Humberto), así que exponer la URL no abre ningún acceso nuevo.
+      client: { key: client.key, name: client.name, sheetUrl: `https://docs.google.com/spreadsheets/d/${client.sheetId}/edit` },
       daily,
       ultimaAgenda,
       syncedAt: new Date().toISOString(),
