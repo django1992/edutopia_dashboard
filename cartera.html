@@ -48,16 +48,6 @@ const THRESHOLD_METRICS = [
   { key: "ccPct", label: "Cierre", unit: "%", step: "1" },
 ];
 
-// Color de celda del mapa de calor (vista "Sala de control"): un cuarto escalón "alto" además
-// de los 3 semáforo normales, para distinguir cuentas excelentes de simplemente sanas.
-function heatColor(v, thresholds) {
-  if (v === null || v === undefined) return { bg: "#152E2B", ink: "#5A716D" };
-  const alto = thresholds.warn * 1.5;
-  if (v < thresholds.risk) return { bg: "#B54A3F", ink: "#F2F7F5" };
-  if (v < thresholds.warn) return { bg: "#C9922E", ink: "#0B1F1D" };
-  if (v < alto) return { bg: "#2E7F72", ink: "#F2F7F5" };
-  return { bg: "#4FBFAE", ink: "#0B1F1D" };
-}
 
 function useIsMobile(breakpoint) {
   const [isMobile, setIsMobile] = useState(
@@ -254,9 +244,6 @@ function Cartera() {
     });
   }, [rows]);
 
-  // Últimos 6 meses reales del portafolio (unión entre clientes) -- columnas del mapa de calor.
-  const HEAT_MONTHS = useMemo(() => ALL_MONTHS.slice(-6), [ALL_MONTHS]);
-
   // ---- Cola de alertas real (no hardcodeada) -- reglas propuestas en el README del handoff;
   // ajusta libremente los números si al verlas correr con datos reales no calzan. ----
   const alerts = useMemo(() => {
@@ -438,7 +425,7 @@ function Cartera() {
     portfolio, status, errorMsg, fetchLive,
     thresholds, setThresholds, showThresholds, setShowThresholds,
     query, setQuery, sortBy, setSortBy, toggleSort, sortArrow,
-    bounds, ALL_MONTHS, HEAT_MONTHS, range, setRange, rangeTouched, setRangeTouched, isFullRange, rangeLabel,
+    bounds, ALL_MONTHS, range, setRange, rangeTouched, setRangeTouched, isFullRange, rangeLabel,
     rows, filteredSorted, rankedByRoas, totals, alerts, feed,
     nRiesgo, nAtencion, nSanos,
     view, setView, cardFilter, setCardFilter,
@@ -973,13 +960,33 @@ const RANKING_METRICS = [
   { key: "ccPct", label: "Cierre", fmt: (v) => (v != null ? v.toFixed(0) + "%" : "—"), get: (r) => (r.ok && r.agg ? r.agg.ccPct : null) },
 ];
 
+// Métricas del panel "AYER" de Sala de control -- todas calculadas sobre un único día exacto
+// (ayer), nunca acumuladas ni promediadas. thresholdKey solo en las dos que tienen semáforo
+// configurable; el resto se muestra en texto plano (no hay un umbral definido para gasto/CMI/etc).
+const AYER_METRICS = [
+  { key: "inversion", label: "Gasto", fmt: (v) => (v != null ? k1(v) : "—") },
+  { key: "cmi", label: "CMI", fmt: (v) => (v != null ? num2(v) : "—") },
+  { key: "cpcmi", label: "Costo/CMI", fmt: (v) => (v != null ? k1(v) : "—") },
+  { key: "agendas", label: "Agendas", fmt: (v) => (v != null ? num2(v) : "—") },
+  { key: "scr", label: "% Agend.", fmt: (v) => (v != null ? v.toFixed(0) + "%" : "—"), thresholdKey: "scr" },
+  { key: "citas", label: "Citas", fmt: (v) => (v != null ? num2(v) : "—") },
+  { key: "asistencias", label: "Asistencias", fmt: (v) => (v != null ? num2(v) : "—") },
+  { key: "asisPct", label: "% Asist.", fmt: (v) => (v != null ? v.toFixed(0) + "%" : "—"), thresholdKey: "asisPct" },
+];
+
 // ======================= VISTA 1c — Sala de control (mapa de calor) =======================
 function VistaSala({ ctx }) {
-  const { rows, rankedByRoas, HEAT_MONTHS, totals, alerts, feed, thresholds, isMobile, linkFor } = ctx;
+  const { rows, rankedByRoas, totals, alerts, feed, thresholds, isMobile, linkFor } = ctx;
   const [rankKey, setRankKey] = useState("roas");
   const maxRoas = Math.max(1, ...rankedByRoas.filter((r) => r.roas != null).map((r) => r.roas));
 
-  const heatRows = rankedByRoas.filter((r) => r.ok);
+  // Clientes con cuenta ok, ordenados alfabéticamente -- el panel "Ayer" es un tablero de
+  // monitoreo diario, así que se busca por nombre, no por ranking de desempeño.
+  const ayerRows = useMemo(
+    () => rows.filter((r) => r.ok).slice().sort((a, b) => normText(a.name).localeCompare(normText(b.name))),
+    [rows]
+  );
+  const AYER = yesterdayISO();
 
   const metric = RANKING_METRICS.find((m) => m.key === rankKey) || RANKING_METRICS[0];
   // Ranking ordenado por la métrica elegida (siempre entre cuentas con datos) -- las cuentas
@@ -1036,41 +1043,40 @@ function VistaSala({ ctx }) {
     </div>
   );
 
-  const Heatmap = (
-    <div style={{ ...styles.salaCol, minWidth: isMobile ? 520 : undefined }}>
+  const Ayer = (
+    <div style={styles.salaCol}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
-        <div style={styles.salaLabel}>ROAS POR MES{HEAT_MONTHS.length ? " · " + MONTH_LABELS[HEAT_MONTHS[0].key.slice(5, 7)] + " → " + MONTH_LABELS[HEAT_MONTHS[HEAT_MONTHS.length - 1].key.slice(5, 7)] : ""}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: "#6E8C88" }}>
-          <span>bajo</span>
-          <span style={{ width: 14, height: 10, background: "#B54A3F", borderRadius: 2 }} />
-          <span style={{ width: 14, height: 10, background: "#C9922E", borderRadius: 2 }} />
-          <span style={{ width: 14, height: 10, background: "#2E7F72", borderRadius: 2 }} />
-          <span style={{ width: 14, height: 10, background: "#4FBFAE", borderRadius: 2 }} />
-          <span>alto</span>
-        </div>
+        <div style={styles.salaLabel}>AYER · {fmtDate(AYER)}</div>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: `132px repeat(${Math.max(1, HEAT_MONTHS.length)}, 1fr)`, gap: 4, alignItems: "center" }}>
-        <div></div>
-        {HEAT_MONTHS.map((m) => (
-          <div key={m.key} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#6E8C88", textAlign: "center" }}>
-            {MONTH_LABELS[m.key.slice(5, 7)]}
-          </div>
-        ))}
-        {heatRows.map((r) => (
-          <React.Fragment key={r.key}>
-            <div style={styles.salaClientName} onClick={() => { window.location.href = linkFor(r.key); }} className="odv-dark-row">{r.name}</div>
-            {HEAT_MONTHS.map((m) => {
-              const hasAny = r.daily.some((d) => d.d >= m.start && d.d <= m.end);
-              const v = hasAny ? aggregateExact(r.daily, m.start, m.end).roas : null;
-              const c = heatColor(v, thresholds.roas);
-              return (
-                <div key={m.key} style={{ height: 30, borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600, color: c.ink, background: c.bg }}>
-                  {v != null ? v.toFixed(1).replace(".", ",") : "—"}
+      <div style={styles.ayerGrid}>
+        {ayerRows.map((r) => {
+          const hasYesterday = r.daily.some((d) => d.d === AYER);
+          const agg = hasYesterday ? aggregateExact(r.daily, AYER, AYER) : null;
+          return (
+            <div key={r.key} className="odv-dark-row" style={styles.ayerCard} onClick={() => { window.location.href = linkFor(r.key); }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                <span style={styles.salaClientName}>{r.name}</span>
+                <DataHealthIcon r={r} />
+              </div>
+              {!hasYesterday ? (
+                <div style={{ fontSize: 11, color: "#6E8C88", marginTop: 10 }}>Sin datos de ayer</div>
+              ) : (
+                <div style={styles.ayerMetricsGrid}>
+                  {AYER_METRICS.map((m) => {
+                    const v = agg[m.key];
+                    const color = m.thresholdKey ? DARK_COLORS[classifyThreshold(v, thresholds[m.thresholdKey])] : "#F2F7F5";
+                    return (
+                      <div key={m.key}>
+                        <div style={styles.ayerMetricLabel}>{m.label}</div>
+                        <div style={{ ...styles.ayerMetricValue, color }}>{m.fmt(v)}</div>
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
-          </React.Fragment>
-        ))}
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -1112,13 +1118,13 @@ function VistaSala({ ctx }) {
       {!isMobile ? (
         <div style={styles.salaGrid3}>
           {Ranking}
-          {Heatmap}
+          {Ayer}
           {Sidebar}
         </div>
       ) : (
         <div style={styles.salaGridMobile}>
           {Ranking}
-          <div style={{ overflowX: "auto" }}>{Heatmap}</div>
+          {Ayer}
           {Sidebar}
         </div>
       )}
@@ -1205,6 +1211,13 @@ const styles = {
   salaRankTrack: { height: 4, background: "#152E2B", borderRadius: 2, marginTop: 5 },
   salaAlertCard: { background: "#122B28", border: "1px solid #1D3B38", borderLeft: "3px solid", borderRadius: 8, padding: "11px 13px" },
   salaFooter: { padding: "12px 26px", borderTop: "1px solid #1D3B38", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#6E8C88" },
+
+  // --- Panel "Ayer" de Sala de control (1c) ---
+  ayerGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 10 },
+  ayerCard: { background: "#122B28", border: "1px solid #1D3B38", borderRadius: 10, padding: "12px 14px", cursor: "pointer" },
+  ayerMetricsGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 8px", marginTop: 12 },
+  ayerMetricLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: "0.03em", color: "#6E8C88", marginBottom: 3 },
+  ayerMetricValue: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600 },
 };
 
 // Variante oscura de los estilos de cabecera usados por TopBar cuando la vista activa es
