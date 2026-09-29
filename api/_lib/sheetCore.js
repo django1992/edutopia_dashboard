@@ -1,4 +1,3 @@
-
 // api/_lib/sheetCore.js — lógica compartida de acceso a Google Sheets.
 //
 // Extraído de api/sheet.js para que api/sheet.js (panel individual) y
@@ -371,4 +370,9 @@ module.exports = {
   getParam,
   readClientSheet,
   REGISTRY_TAB,
+  // Exportados también para api/_lib/finanzasCore.js (hoja de ingresos/gastos de la empresa,
+  // que no tiene nada que ver con los clientes pero reutiliza el mismo parseo de fechas/montos
+  // de Google Sheets en vez de duplicarlo).
+  isoFromCell,
+  toNum,
 };
