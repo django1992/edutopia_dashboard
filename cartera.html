@@ -29,6 +29,7 @@ const { useState, useEffect, useMemo } = React;
 // lib/aggregate.js (DEFAULT_THRESHOLDS, loadThresholds, saveThresholds, classifyThreshold)
 // para que index.html use exactamente los mismos valores. ----
 const CACHE_KEY = "cartera:lastPortfolio";
+const FIN_CACHE_KEY = "cartera:lastFinanzas";
 const VIEW_KEY = "cartera:view";
 const REFRESH_MS = 5 * 60 * 1000;
 
@@ -38,7 +39,23 @@ const VIEWS = [
   { key: "tabla", label: "Tabla" },
   { key: "sala", label: "Sala de control" },
   { key: "tarjetas", label: "Tarjetas" },
+  { key: "finanzas", label: "Finanzas" },
 ];
+
+const MES_ORDEN = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+
+// Categorías de gasto en el orden en que se muestran (mismo orden que las reglas de
+// api/_lib/finanzasCore.js, para que la leyenda de colores sea siempre consistente).
+const EGRESO_CATEGORIAS = ["Nómina y honorarios", "Impuestos", "Bancario y contable", "Publicidad", "Herramientas y software", "Mentorías y formación", "Otros"];
+const CATEGORIA_COLORS = {
+  "Nómina y honorarios": "#0E7C7B",
+  "Impuestos": "#B54A3F",
+  "Bancario y contable": "#4C7EA6",
+  "Publicidad": "#8B5CF6",
+  "Herramientas y software": "#3FA796",
+  "Mentorías y formación": "#C9922E",
+  "Otros": "#8AA19E",
+};
 
 // Metadatos del panel "⚙ Umbrales": un grupo de 2 campos (riesgo/atención) por métrica.
 const THRESHOLD_METRICS = [
@@ -91,6 +108,12 @@ function Cartera() {
   const [cardFilter, setCardFilter] = useState("todos");
   const isMobile = useIsMobile(760);
 
+  // ---- Finanzas de la empresa (Ingresos/Egresos de Edutopia, independiente de los clientes) ----
+  const [finanzas, setFinanzas] = useState(() => loadCache(FIN_CACHE_KEY, { ingresos: [], egresos: [] }));
+  const [finStatus, setFinStatus] = useState(() => (loadCache(FIN_CACHE_KEY, null) ? "cached-initial" : "loading"));
+  const [finErrorMsg, setFinErrorMsg] = useState(null);
+  const [finNotConfigured, setFinNotConfigured] = useState(false);
+
   useEffect(() => { saveThresholds(thresholds); }, [thresholds]);
   useEffect(() => { saveCache(VIEW_KEY, view); }, [view]);
 
@@ -115,10 +138,34 @@ function Cartera() {
       });
   };
 
+  const fetchFinanzas = () => {
+    setFinStatus((s) => (s === "cached-initial" ? s : "loading"));
+    fetch("/api/finanzas?t=" + Date.now())
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.ok) {
+          setFinanzas(json);
+          setFinStatus("live");
+          setFinErrorMsg(null);
+          setFinNotConfigured(false);
+          saveCache(FIN_CACHE_KEY, json);
+        } else {
+          setFinStatus("cached-error");
+          setFinErrorMsg(json.error || "Respuesta inválida del servidor");
+          setFinNotConfigured(!!json.notConfigured);
+        }
+      })
+      .catch((err) => {
+        setFinStatus("cached-error");
+        setFinErrorMsg(String(err));
+      });
+  };
+
   useEffect(() => {
     fetchLive();
+    fetchFinanzas();
     const id = setInterval(() => {
-      if (document.visibilityState === "visible") fetchLive();
+      if (document.visibilityState === "visible") { fetchLive(); fetchFinanzas(); }
     }, REFRESH_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -431,6 +478,7 @@ function Cartera() {
     nRiesgo, nAtencion, nSanos,
     view, setView, cardFilter, setCardFilter,
     isMobile, linkFor, cellMoney, cellNum, isDark,
+    finanzas, finStatus, finErrorMsg, finNotConfigured, fetchFinanzas,
   };
 
   return (
@@ -456,7 +504,7 @@ function Cartera() {
 
       <TopBar ctx={ctx} />
 
-      {showThresholds && (
+      {showThresholds && view !== "finanzas" && (
         <div style={isDark ? styles.thresholdsPanelDark : styles.thresholdsPanel} className="odv-fade">
           <span style={isDark ? styles.thresholdsLabelDark : styles.thresholdsLabel}>Umbrales de semáforo por métrica (se guardan en este navegador y los usa también el panel individual de cada cliente):</span>
           <div style={styles.thresholdsGrid}>
@@ -488,6 +536,7 @@ function Cartera() {
       {view === "tabla" && <VistaTabla ctx={ctx} />}
       {view === "sala" && <VistaSala ctx={ctx} />}
       {view === "tarjetas" && <VistaTarjetas ctx={ctx} />}
+      {view === "finanzas" && <VistaFinanzas ctx={ctx} />}
     </div>
   );
 }
@@ -496,43 +545,67 @@ function TopBar({ ctx }) {
   const { rows, status, portfolio, fetchLive, showThresholds, setShowThresholds, bounds, ALL_MONTHS,
     range, setRange, rangeTouched, setRangeTouched, isFullRange, view, setView, isDark } = ctx;
 
-  const titleFor = { tabla: "Todos los clientes", sala: "Sala de control", tarjetas: "Estado de la cartera" }[view];
+  const titleFor = { tabla: "Todos los clientes", sala: "Sala de control", tarjetas: "Estado de la cartera", finanzas: "Finanzas de Edutopia" }[view];
   const s = isDark ? darkTop : styles;
 
   return (
     <header style={s.header} className="odv-fade">
       <div>
-        <div style={s.eyebrow}>CARTERA · META ADS × VENTAS</div>
+        <div style={s.eyebrow}>{view === "finanzas" ? "CONTROL EMPRESARIAL · EDUTOPIA" : "CARTERA · META ADS × VENTAS"}</div>
         <h1 style={s.h1}>{titleFor}</h1>
         <div style={s.subtitle}>
-          {rows.length} cuenta{rows.length === 1 ? "" : "s"} · {ctx.rangeLabel} · cifras exactas por día
+          {view === "finanzas"
+            ? "ingresos, gastos y utilidad de la empresa, mes a mes"
+            : <>{rows.length} cuenta{rows.length === 1 ? "" : "s"} · {ctx.rangeLabel} · cifras exactas por día</>}
         </div>
       </div>
 
       <div style={styles.controlsCol}>
         <div style={styles.statusRow}>
-          {status === "loading" && (
-            <span style={s.statusBadge}><span className="odv-spin">↻</span> Conectando con Sheets…</span>
+          {view === "finanzas" ? (
+            <>
+              {ctx.finStatus === "loading" && (
+                <span style={s.statusBadge}><span className="odv-spin">↻</span> Conectando con Sheets…</span>
+              )}
+              {ctx.finStatus === "live" && (
+                <span style={{ ...s.statusBadge, color: "#0E7C7B" }}>● En vivo · sync {timeAgo(ctx.finanzas.syncedAt)}</span>
+              )}
+              {ctx.finStatus === "cached-error" && !ctx.finNotConfigured && (
+                <span style={{ ...s.statusBadge, color: "#D4685C" }} title={ctx.finErrorMsg || ""}>● Datos guardados (sin conexión en vivo)</span>
+              )}
+              {ctx.finStatus === "cached-initial" && (
+                <span style={{ ...s.statusBadge, color: "#8AA19E" }}>● Datos guardados</span>
+              )}
+              <span className="odv-refresh" style={s.refreshBtn} onClick={ctx.fetchFinanzas} title="Actualizar ahora">
+                ↻ Actualizar
+              </span>
+            </>
+          ) : (
+            <>
+              {status === "loading" && (
+                <span style={s.statusBadge}><span className="odv-spin">↻</span> Conectando con Sheets…</span>
+              )}
+              {status === "live" && (
+                <span style={{ ...s.statusBadge, color: isDark ? "#4FBFAE" : "#0E7C7B" }}>● En vivo · sync {timeAgo(portfolio.syncedAt)}</span>
+              )}
+              {status === "cached-error" && (
+                <span style={{ ...s.statusBadge, color: "#D4685C" }}>● Datos guardados (sin conexión en vivo)</span>
+              )}
+              {status === "cached-initial" && (
+                <span style={{ ...s.statusBadge, color: "#8AA19E" }}>● Datos guardados</span>
+              )}
+              <span className="odv-refresh" style={s.refreshBtn} onClick={fetchLive} title="Actualizar ahora">
+                ↻ Actualizar
+              </span>
+              <span
+                className="odv-refresh"
+                style={{ ...s.refreshBtn, color: isDark ? "#9FB7B3" : "#5B6E6B" }}
+                onClick={() => setShowThresholds((v) => !v)}
+              >
+                ⚙ Umbrales
+              </span>
+            </>
           )}
-          {status === "live" && (
-            <span style={{ ...s.statusBadge, color: isDark ? "#4FBFAE" : "#0E7C7B" }}>● En vivo · sync {timeAgo(portfolio.syncedAt)}</span>
-          )}
-          {status === "cached-error" && (
-            <span style={{ ...s.statusBadge, color: "#D4685C" }}>● Datos guardados (sin conexión en vivo)</span>
-          )}
-          {status === "cached-initial" && (
-            <span style={{ ...s.statusBadge, color: "#8AA19E" }}>● Datos guardados</span>
-          )}
-          <span className="odv-refresh" style={s.refreshBtn} onClick={fetchLive} title="Actualizar ahora">
-            ↻ Actualizar
-          </span>
-          <span
-            className="odv-refresh"
-            style={{ ...s.refreshBtn, color: isDark ? "#9FB7B3" : "#5B6E6B" }}
-            onClick={() => setShowThresholds((v) => !v)}
-          >
-            ⚙ Umbrales
-          </span>
         </div>
 
         <div style={styles.pillRow}>
@@ -548,7 +621,7 @@ function TopBar({ ctx }) {
           ))}
         </div>
 
-        {bounds && (
+        {bounds && view !== "finanzas" && (
           <div style={styles.pillRow}>
             <button
               className="odv-pill"
@@ -1156,6 +1229,174 @@ function VistaSala({ ctx }) {
   );
 }
 
+// ======================= VISTA 4 — Finanzas de la empresa =======================
+// Independiente de los clientes: lee /api/finanzas (planilla de Ingresos/Egresos de Edutopia,
+// compartida con la misma cuenta de servicio). Agrupa SIEMPRE por la columna de texto "mes"
+// (nunca por la fecha real, que en los datos reales de Humberto trae años desactualizados en
+// Egresos -- ver la nota en api/_lib/finanzasCore.js) y nunca combina "realizado" con
+// "pendiente"/"en riesgo": son 3 números separados, tal como Humberto pidió.
+function VistaFinanzas({ ctx }) {
+  const { finanzas, finStatus, finErrorMsg, finNotConfigured } = ctx;
+  const ingresos = finanzas.ingresos || [];
+  const egresos = finanzas.egresos || [];
+  const [periodo, setPeriodo] = useState("acumulado"); // "acumulado" | nombre de mes
+
+  const meses = useMemo(() => {
+    const set = new Set();
+    ingresos.forEach((i) => { if (i.mes) set.add(i.mes); });
+    egresos.forEach((e) => { if (e.mes) set.add(e.mes); });
+    return MES_ORDEN.filter((m) => set.has(m));
+  }, [ingresos, egresos]);
+
+  const porMes = useMemo(() => {
+    const acc = {};
+    meses.forEach((m) => { acc[m] = { realizado: 0, pendiente: 0, enRiesgoCount: 0, egreso: 0, categorias: {} }; });
+    ingresos.forEach((i) => {
+      const b = acc[i.mes];
+      if (!b) return;
+      if (i.estado === "Pago realizado") b.realizado += i.montoCLP;
+      else if (i.estado === "Pago pendiente") b.pendiente += i.montoCLP;
+      else if (i.estado === "Perdido" || i.estado === "Peligrando" || i.estado === "Caliente") b.enRiesgoCount += 1;
+    });
+    egresos.forEach((e) => {
+      const b = acc[e.mes];
+      if (!b) return;
+      b.egreso += e.montoCLP;
+      b.categorias[e.categoria] = (b.categorias[e.categoria] || 0) + e.montoCLP;
+    });
+    meses.forEach((m) => {
+      const b = acc[m];
+      b.utilidad = b.realizado - b.egreso;
+      b.margen = b.realizado ? (b.utilidad / b.realizado) * 100 : null;
+    });
+    return acc;
+  }, [ingresos, egresos, meses]);
+
+  const periodoData = useMemo(() => {
+    if (periodo !== "acumulado" && porMes[periodo]) return porMes[periodo];
+    const tot = { realizado: 0, pendiente: 0, enRiesgoCount: 0, egreso: 0, categorias: {} };
+    meses.forEach((m) => {
+      const b = porMes[m];
+      tot.realizado += b.realizado;
+      tot.pendiente += b.pendiente;
+      tot.enRiesgoCount += b.enRiesgoCount;
+      tot.egreso += b.egreso;
+      Object.keys(b.categorias).forEach((c) => { tot.categorias[c] = (tot.categorias[c] || 0) + b.categorias[c]; });
+    });
+    tot.utilidad = tot.realizado - tot.egreso;
+    tot.margen = tot.realizado ? (tot.utilidad / tot.realizado) * 100 : null;
+    return tot;
+  }, [periodo, meses, porMes]);
+
+  const maxMonthly = Math.max(1, ...meses.map((m) => Math.max(porMes[m].realizado, porMes[m].egreso)));
+  const categoriasOrdenadas = useMemo(() => {
+    return EGRESO_CATEGORIAS
+      .map((c) => ({ label: c, monto: periodoData.categorias[c] || 0 }))
+      .filter((c) => c.monto > 0)
+      .sort((a, b) => b.monto - a.monto);
+  }, [periodoData]);
+  const maxCategoria = Math.max(1, ...categoriasOrdenadas.map((c) => c.monto));
+
+  if (finNotConfigured) {
+    return (
+      <div style={styles.finEmptyBox} className="odv-fade">
+        <div style={styles.finEmptyTitle}>Finanzas todavía no está conectado</div>
+        <div style={styles.finEmptyText}>
+          Falta compartir tu Google Sheets de Ingresos/Egresos con la misma cuenta de servicio de tus clientes, y agregar la variable <code>FINANZAS_SHEET_ID</code> en Vercel con su ID (el que va en la URL, entre <code>/d/</code> y <code>/edit</code>).
+        </div>
+      </div>
+    );
+  }
+  if (!meses.length) {
+    return (
+      <div style={styles.finEmptyBox} className="odv-fade">
+        <div style={styles.finEmptyTitle}>
+          {finStatus === "loading" ? "Cargando datos financieros…" : finErrorMsg ? "No se pudo cargar Finanzas" : "Todavía no hay movimientos"}
+        </div>
+        {finErrorMsg && finStatus !== "loading" && <div style={styles.finEmptyText}>{finErrorMsg}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={styles.pillRow} className="odv-fade">
+        <button className="odv-pill" style={periodo === "acumulado" ? styles.pillActive : styles.pill} onClick={() => setPeriodo("acumulado")}>
+          Acumulado
+        </button>
+        {meses.map((m) => (
+          <button key={m} className="odv-pill" style={periodo === m ? styles.pillActive : styles.pill} onClick={() => setPeriodo(m)}>
+            {m}
+          </button>
+        ))}
+      </div>
+
+      <section style={styles.kpiRow} className="odv-fade">
+        <KpiCard label="Ingreso realizado" value={k1(periodoData.realizado)} accent="teal" sub="ya cobrado" />
+        <KpiCard label="Por cobrar" value={k1(periodoData.pendiente)} accent="amber" sub="comprometido, no cobrado aún" />
+        <KpiCard label="Egresos" value={k1(periodoData.egreso)} accent="coral" sub={`${categoriasOrdenadas.length} categoría${categoriasOrdenadas.length === 1 ? "" : "s"}`} />
+        <KpiCard
+          label="Utilidad neta"
+          value={k1(periodoData.utilidad)}
+          accent={periodoData.utilidad < 0 ? "coral" : "mint"}
+          sub={periodoData.margen != null ? `margen ${periodoData.margen.toFixed(0)}%` : "sin ingreso realizado"}
+        />
+      </section>
+
+      {periodoData.enRiesgoCount > 0 && (
+        <div style={styles.finRiesgoStrip} className="odv-fade">
+          🚩 {periodoData.enRiesgoCount} oportunidad{periodoData.enRiesgoCount === 1 ? "" : "es"} perdida{periodoData.enRiesgoCount === 1 ? "" : "s"} o en riesgo en este período (no cuentan como ingreso)
+        </div>
+      )}
+
+      <div style={styles.finGrid2}>
+        <div style={styles.panel} className="odv-fade">
+          <div style={styles.panelTitle}>Ingresos vs. Egresos por mes</div>
+          <div style={styles.finTrendWrap}>
+            {meses.map((m) => {
+              const b = porMes[m];
+              return (
+                <div key={m} style={styles.finTrendCol}>
+                  <div style={styles.finTrendBars}>
+                    <div style={{ ...styles.finTrendBar, background: COLORS.healthy, height: Math.max(3, (b.realizado / maxMonthly) * 100) + "%" }} title={`Ingreso realizado: ${clp(b.realizado)}`} />
+                    <div style={{ ...styles.finTrendBar, background: COLORS.risk, height: Math.max(3, (b.egreso / maxMonthly) * 100) + "%" }} title={`Egresos: ${clp(b.egreso)}`} />
+                  </div>
+                  <div style={styles.finTrendLabel}>{m.slice(0, 3)}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={styles.finLegendRow}>
+            <span><span style={{ ...styles.finLegendDot, background: COLORS.healthy }} /> Ingreso realizado</span>
+            <span><span style={{ ...styles.finLegendDot, background: COLORS.risk }} /> Egresos</span>
+          </div>
+        </div>
+
+        <div style={styles.panel} className="odv-fade">
+          <div style={styles.panelTitle}>Gastos por categoría{periodo !== "acumulado" ? ` · ${periodo}` : ""}</div>
+          {categoriasOrdenadas.length === 0 ? (
+            <div style={{ color: "#8AA19E", fontSize: 13, marginTop: 10 }}>Sin gastos en este período.</div>
+          ) : (
+            categoriasOrdenadas.map((c) => (
+              <div key={c.label} style={styles.finCatRow}>
+                <div style={styles.finCatLabel}>{c.label}</div>
+                <div style={styles.finCatBarTrack}>
+                  <div style={{ ...styles.finCatBar, width: (c.monto / maxCategoria) * 100 + "%", background: CATEGORIA_COLORS[c.label] || COLORS.muted }} />
+                </div>
+                <div style={styles.finCatValue}>{k1(c.monto)}</div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div style={styles.footnote}>
+        * "Ingreso realizado" solo cuenta pagos ya cobrados (excluye pendientes y oportunidades perdidas/en riesgo). Los montos usan la columna "Monto CLP" de tu planilla. Las categorías de gasto se agrupan automáticamente por palabras clave del concepto de cada gasto — avísame si alguna te parece mal clasificada y ajusto las reglas.
+      </div>
+    </div>
+  );
+}
+
 const styles = {
   page: { fontFamily: "'Inter', sans-serif", color: "#12201F", padding: "32px clamp(16px, 4vw, 48px)", minHeight: "100%" },
   header: { display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-end", gap: 20, marginBottom: 22, borderBottom: "1px solid #DCE4E2", paddingBottom: 20 },
@@ -1190,6 +1431,24 @@ const styles = {
   kpiSub: { fontSize: 12, marginTop: 6, fontWeight: 500 },
   panel: { background: "#fff", border: "1px solid #E1E8E6", borderRadius: 14, padding: "20px 22px", marginBottom: 16 },
   panelTitle: { fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 600, color: "#0B1F1D" },
+  // ---- Vista Finanzas ----
+  finEmptyBox: { background: "#fff", border: "1px solid #E1E8E6", borderRadius: 14, padding: "36px 24px", textAlign: "center" },
+  finEmptyTitle: { fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 600, color: "#0B1F1D", marginBottom: 8 },
+  finEmptyText: { fontSize: 13, color: "#5B6E6B", maxWidth: 520, margin: "0 auto", lineHeight: 1.5 },
+  finRiesgoStrip: { background: "#FDF6E9", border: "1px solid #EBD8AE", borderRadius: 12, padding: "12px 18px", fontSize: 13, color: "#5B4A16", marginBottom: 22 },
+  finGrid2: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, alignItems: "start" },
+  finTrendWrap: { display: "flex", alignItems: "flex-end", gap: 14, height: 160, paddingTop: 8, overflowX: "auto" },
+  finTrendCol: { display: "flex", flexDirection: "column", alignItems: "center", gap: 8, minWidth: 34 },
+  finTrendBars: { display: "flex", alignItems: "flex-end", gap: 3, height: 130 },
+  finTrendBar: { width: 12, borderRadius: "3px 3px 0 0", minHeight: 3 },
+  finTrendLabel: { fontSize: 11, color: "#8AA19E", fontFamily: "'IBM Plex Mono', monospace" },
+  finLegendRow: { display: "flex", gap: 18, marginTop: 14, fontSize: 12, color: "#5B6E6B" },
+  finLegendDot: { display: "inline-block", width: 8, height: 8, borderRadius: "50%", marginRight: 6 },
+  finCatRow: { display: "flex", alignItems: "center", gap: 10, marginTop: 12 },
+  finCatLabel: { fontSize: 12.5, color: "#12201F", width: 150, flex: "none" },
+  finCatBarTrack: { flex: 1, height: 8, borderRadius: 4, background: "#EEF3F2", overflow: "hidden" },
+  finCatBar: { height: "100%", borderRadius: 4 },
+  finCatValue: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, fontWeight: 600, color: "#0B1F1D", width: 64, flex: "none", textAlign: "right" },
   toolbar: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 },
   toolbarRight: { display: "flex", gap: 8, alignItems: "center" },
   searchInput: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#5B6E6B", border: "1px solid #DCE4E2", borderRadius: 8, padding: "7px 12px", background: "#fff", minWidth: 180 },
