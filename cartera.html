@@ -104,7 +104,7 @@ function Cartera() {
   const [sortBy, setSortBy] = useState({ col: "roas", dir: "desc" });
   const [rangeTouched, setRangeTouched] = useState(false);
   const [range, setRange] = useState({ start: null, end: null });
-  const [view, setView] = useState(() => loadCache(VIEW_KEY, "tabla"));
+  const [view, setView] = useState(() => loadCache(VIEW_KEY, "sala"));
   const [cardFilter, setCardFilter] = useState("todos");
   const isMobile = useIsMobile(760);
 
@@ -562,6 +562,16 @@ function TopBar({ ctx }) {
 
       <div style={styles.controlsCol}>
         <div style={styles.statusRow}>
+          {view !== "sala" && (
+            <span
+              className="odv-refresh"
+              style={{ ...s.refreshBtn, color: isDark ? "#9FB7B3" : "#5B6E6B" }}
+              onClick={() => setView("sala")}
+              title="Volver a la Sala de control"
+            >
+              🏠 Home
+            </span>
+          )}
           {view === "finanzas" ? (
             <>
               {ctx.finStatus === "loading" && (
