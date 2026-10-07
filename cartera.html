@@ -34,11 +34,18 @@ const VIEW_KEY = "cartera:view";
 const REFRESH_MS = 5 * 60 * 1000;
 
 const COLORS = { risk: "#B54A3F", warn: "#C9922E", healthy: "#0E7C7B", muted: "#8AA19E" };
-const DARK_COLORS = { risk: "#D4685C", warn: "#DCA94A", healthy: "#4FBFAE", muted: "#6E8C88" };
+const DARK_COLORS = { risk: "#C66E61", warn: "#D4AB5B", healthy: "#6FBDAE", muted: "#748B88" };
+// La cola de atención de Sala de control reutiliza el color de alerta compartido con Tabla/
+// Tarjetas (COLORS.risk/warn, tema claro) para decidir severidad, pero en el tema oscuro el
+// borde izquierdo de cada tarjeta usa un tono más apagado (solo el borde, nunca el texto).
+const DARK_ALERT_BORDER = { [COLORS.risk]: "#A85144", [COLORS.warn]: "#C19443" };
+// Etiquetas visibles del menú lateral (Sidebar) para cada vista -- el key interno NO cambia
+// (se sigue guardando en localStorage como "tabla"/"sala"/"tarjetas"/"finanzas"), solo la
+// etiqueta visible de "tarjetas" pasó a llamarse "Resumen" con el rediseño de navegación.
 const VIEWS = [
-  { key: "tabla", label: "Tabla" },
+  { key: "tabla", label: "Tabla de clientes" },
   { key: "sala", label: "Sala de control" },
-  { key: "tarjetas", label: "Tarjetas" },
+  { key: "tarjetas", label: "Resumen" },
   { key: "finanzas", label: "Finanzas" },
 ];
 
@@ -106,6 +113,9 @@ function Cartera() {
   const [range, setRange] = useState({ start: null, end: null });
   const [view, setView] = useState(() => loadCache(VIEW_KEY, "sala"));
   const [cardFilter, setCardFilter] = useState("todos");
+  // Buscador del menú lateral (Sidebar) -- independiente del buscador de la vista Tabla (`query`)
+  // para no acoplar ambas vistas: filtra solo la lista de clientes dentro del propio Sidebar.
+  const [sidebarQuery, setSidebarQuery] = useState("");
   const isMobile = useIsMobile(760);
 
   // ---- Finanzas de la empresa (Ingresos/Egresos de Edutopia, independiente de los clientes) ----
@@ -479,10 +489,16 @@ function Cartera() {
     view, setView, cardFilter, setCardFilter,
     isMobile, linkFor, cellMoney, cellNum, isDark,
     finanzas, finStatus, finErrorMsg, finNotConfigured, fetchFinanzas,
+    sidebarQuery, setSidebarQuery,
   };
 
   return (
-    <div style={{ ...styles.page, background: isDark ? "#0B1F1D" : "#F5F7F6" }}>
+    <div style={styles.appShell}>
+      {/* El menú lateral es chrome nuevo y persistente -- en mobile se omite por completo para
+          no tocar en nada el layout angosto que ya existía (mismo criterio que isMobile usa en
+          el resto de la app). */}
+      {!isMobile && <Sidebar ctx={ctx} />}
+      <div style={{ ...styles.page, background: isDark ? "#101F1D" : "#F5F7F6", flex: 1, minWidth: 0 }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
         * { box-sizing: border-box; }
@@ -498,7 +514,7 @@ function Cartera() {
         .odv-refresh:hover { opacity: 0.7; }
         @keyframes odvSpin { to { transform: rotate(360deg); } }
         .odv-spin { display: inline-block; animation: odvSpin 1s linear infinite; }
-        .odv-dark-row:hover { background: #152E2B; cursor: pointer; }
+        .odv-dark-row:hover { background: #1B2E2B; cursor: pointer; }
         input[type="date"] { color-scheme: light; }
       `}</style>
 
@@ -510,7 +526,7 @@ function Cartera() {
           <div style={styles.thresholdsGrid}>
             {THRESHOLD_METRICS.map((m) => (
               <div key={m.key} style={styles.thresholdsGroup}>
-                <div style={isDark ? { ...styles.thresholdsGroupTitle, color: "#C9D8D5" } : styles.thresholdsGroupTitle}>{m.label}</div>
+                <div style={isDark ? { ...styles.thresholdsGroupTitle, color: "#CCD8D5" } : styles.thresholdsGroupTitle}>{m.label}</div>
                 <label style={styles.thresholdsField}>
                   Riesgo bajo
                   <input
@@ -537,15 +553,129 @@ function Cartera() {
       {view === "sala" && <VistaSala ctx={ctx} />}
       {view === "tarjetas" && <VistaTarjetas ctx={ctx} />}
       {view === "finanzas" && <VistaFinanzas ctx={ctx} />}
+      </div>
     </div>
+  );
+}
+
+// Secciones del menú lateral (Sidebar). Cada ítem con `view` apunta a una vista real existente
+// (mismo `view`/`setView` que antes manejaban las pills del TopBar); los ítems con `soon: true`
+// son del rediseño completo que Humberto mostró (Bitácora, Metas, Alertas como página propia,
+// Fuentes de datos, Configuración) pero que todavía no se construyen en esta etapa -- se listan
+// igual (para que el menú se vea completo, como en el diseño) pero deshabilitados con tag "Pronto".
+const SIDEBAR_SECTIONS = [
+  { title: "REUNIÓN DIARIA", items: [{ label: "Bitácora", soon: true }] },
+  {
+    title: "CARTERA",
+    items: [
+      { label: VIEWS.find((v) => v.key === "tarjetas").label, view: "tarjetas" },
+      { label: VIEWS.find((v) => v.key === "tabla").label, view: "tabla" },
+      { label: VIEWS.find((v) => v.key === "sala").label, view: "sala" },
+    ],
+  },
+  {
+    title: "ANÁLISIS",
+    items: [
+      { label: VIEWS.find((v) => v.key === "finanzas").label, view: "finanzas" },
+      { label: "Metas", soon: true },
+      { label: "Alertas", soon: true },
+    ],
+  },
+];
+const SIDEBAR_BOTTOM_ITEMS = [{ label: "Fuentes de datos", soon: true }, { label: "Configuración", soon: true }];
+
+function Sidebar({ ctx }) {
+  const { view, setView, rankedByRoas, linkFor, sidebarQuery, setSidebarQuery } = ctx;
+
+  const q = normText(sidebarQuery);
+  const clientList = q ? rankedByRoas.filter((r) => normText(r.name).includes(q)) : rankedByRoas;
+
+  return (
+    <nav style={styles.sidebar} className="odv-fade">
+      <div style={styles.sidebarLogoRow}>
+        <span style={styles.sidebarLogoMark}>C</span>
+        <span style={styles.sidebarLogoText}>Cartera</span>
+      </div>
+
+      <div style={styles.sidebarAllClients}>
+        <div style={styles.sidebarAllClientsLabel}>Todos los clientes</div>
+        <div style={styles.sidebarAllClientsSub}>{rankedByRoas.length} cuentas</div>
+      </div>
+
+      <input
+        type="text"
+        placeholder="Buscar…"
+        value={sidebarQuery}
+        onChange={(e) => setSidebarQuery(e.target.value)}
+        style={styles.sidebarSearch}
+      />
+
+      <div style={styles.sidebarScroll}>
+        {SIDEBAR_SECTIONS.map((sec) => (
+          <div key={sec.title} style={styles.sidebarSection}>
+            <div style={styles.sidebarSectionTitle}>{sec.title}</div>
+            {sec.items.map((it) => (
+              <button
+                key={it.label}
+                className="odv-pill"
+                disabled={!!it.soon}
+                title={it.soon ? "Próximamente" : undefined}
+                style={it.soon ? styles.sidebarNavItemSoon : (view === it.view ? styles.sidebarNavItemActive : styles.sidebarNavItem)}
+                onClick={() => it.view && setView(it.view)}
+              >
+                <span>{it.label}</span>
+                {it.soon && <span style={styles.sidebarSoonTag}>Pronto</span>}
+              </button>
+            ))}
+          </div>
+        ))}
+
+        <div style={{ ...styles.sidebarSection, borderTop: "1px solid #182B28", paddingTop: 10 }}>
+          {SIDEBAR_BOTTOM_ITEMS.map((it) => (
+            <button key={it.label} className="odv-pill" disabled title="Próximamente" style={styles.sidebarNavItemSoon}>
+              <span>{it.label}</span>
+              <span style={styles.sidebarSoonTag}>Pronto</span>
+            </button>
+          ))}
+        </div>
+
+        <div style={styles.sidebarSection}>
+          <div style={styles.sidebarSectionTitle}>CLIENTES · {rankedByRoas.length}</div>
+          {clientList.map((r) => (
+            <div
+              key={r.key}
+              className="odv-dark-row"
+              style={styles.sidebarClientRow}
+              title={r.name}
+              onClick={() => { window.location.href = linkFor(r.key); }}
+            >
+              <span style={{ ...styles.sidebarClientDot, background: DARK_COLORS[r.status] }} />
+              <span style={styles.sidebarClientName}>{r.name}</span>
+              <span style={styles.sidebarClientRoas}>{r.roas != null ? r.roas.toFixed(1).replace(".", ",") + "×" : "—"}</span>
+            </div>
+          ))}
+          {sidebarQuery && !clientList.length && (
+            <div style={{ fontSize: 11.5, color: "#748B88", padding: "6px 10px" }}>Sin resultados para “{sidebarQuery}”.</div>
+          )}
+        </div>
+      </div>
+
+      <div style={styles.sidebarFooter}>
+        <span style={styles.sidebarAvatar}>HH</span>
+        <div>
+          <div style={styles.sidebarFooterName}>Humberto</div>
+          <div style={styles.sidebarFooterRole}>Admin</div>
+        </div>
+      </div>
+    </nav>
   );
 }
 
 function TopBar({ ctx }) {
   const { rows, status, portfolio, fetchLive, showThresholds, setShowThresholds, bounds, ALL_MONTHS,
-    range, setRange, rangeTouched, setRangeTouched, isFullRange, view, setView, isDark } = ctx;
+    range, setRange, rangeTouched, setRangeTouched, isFullRange, view, isDark } = ctx;
 
-  const titleFor = { tabla: "Todos los clientes", sala: "Sala de control", tarjetas: "Estado de la cartera", finanzas: "Finanzas de Edutopia" }[view];
+  const titleFor = { tabla: "Todos los clientes", sala: "Sala de control", tarjetas: "Resumen", finanzas: "Finanzas de Edutopia" }[view];
   const s = isDark ? darkTop : styles;
 
   return (
@@ -562,16 +692,6 @@ function TopBar({ ctx }) {
 
       <div style={styles.controlsCol}>
         <div style={styles.statusRow}>
-          {view !== "sala" && (
-            <span
-              className="odv-refresh"
-              style={{ ...s.refreshBtn, color: isDark ? "#9FB7B3" : "#5B6E6B" }}
-              onClick={() => setView("sala")}
-              title="Volver a la Sala de control"
-            >
-              🏠 Home
-            </span>
-          )}
           {view === "finanzas" ? (
             <>
               {ctx.finStatus === "loading" && (
@@ -596,7 +716,7 @@ function TopBar({ ctx }) {
                 <span style={s.statusBadge}><span className="odv-spin">↻</span> Conectando con Sheets…</span>
               )}
               {status === "live" && (
-                <span style={{ ...s.statusBadge, color: isDark ? "#4FBFAE" : "#0E7C7B" }}>● En vivo · sync {timeAgo(portfolio.syncedAt)}</span>
+                <span style={{ ...s.statusBadge, color: isDark ? "#6FBDAE" : "#0E7C7B" }}>● En vivo · sync {timeAgo(portfolio.syncedAt)}</span>
               )}
               {status === "cached-error" && (
                 <span style={{ ...s.statusBadge, color: "#D4685C" }}>● Datos guardados (sin conexión en vivo)</span>
@@ -609,26 +729,13 @@ function TopBar({ ctx }) {
               </span>
               <span
                 className="odv-refresh"
-                style={{ ...s.refreshBtn, color: isDark ? "#9FB7B3" : "#5B6E6B" }}
+                style={{ ...s.refreshBtn, color: isDark ? "#A4B6B3" : "#5B6E6B" }}
                 onClick={() => setShowThresholds((v) => !v)}
               >
                 ⚙ Umbrales
               </span>
             </>
           )}
-        </div>
-
-        <div style={styles.pillRow}>
-          {VIEWS.map((v) => (
-            <button
-              key={v.key}
-              className="odv-pill"
-              style={view === v.key ? styles.pillActive : styles.pill}
-              onClick={() => setView(v.key)}
-            >
-              {v.label}
-            </button>
-          ))}
         </div>
 
         {bounds && view !== "finanzas" && (
@@ -1168,7 +1275,7 @@ function VistaSala({ ctx }) {
                 <TrackerLink url={r.sheetUrl} />
               </div>
               {!hasYesterday ? (
-                <div style={{ fontSize: 11, color: "#6E8C88", marginTop: 10 }}>Sin datos de ayer</div>
+                <div style={{ fontSize: 11, color: "#748B88", marginTop: 10 }}>Sin datos de ayer</div>
               ) : (
                 <div style={styles.ayerMetricsGrid}>
                   {AYER_METRICS.map((m) => {
@@ -1194,21 +1301,21 @@ function VistaSala({ ctx }) {
     <div style={styles.salaCol}>
       <div style={styles.salaLabel}>COLA DE ATENCIÓN</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {alerts.length === 0 && <div style={{ fontSize: 12, color: "#6E8C88" }}>Todo en orden por ahora.</div>}
+        {alerts.length === 0 && <div style={{ fontSize: 12, color: "#748B88" }}>Todo en orden por ahora.</div>}
         {alerts.slice(0, 6).map((a) => (
-          <div key={a.id} style={{ ...styles.salaAlertCard, borderLeftColor: a.color }}>
+          <div key={a.id} style={{ ...styles.salaAlertCard, borderLeftColor: DARK_ALERT_BORDER[a.color] || a.color }}>
             <div style={{ fontSize: 12.5, fontWeight: 600, color: "#F2F7F5" }}>{a.name}</div>
-            <div style={{ fontSize: 11.5, color: "#9FB7B3", marginTop: 3, lineHeight: 1.4 }}>{a.text}</div>
+            <div style={{ fontSize: 11.5, color: "#A4B6B3", marginTop: 3, lineHeight: 1.4 }}>{a.text}</div>
           </div>
         ))}
       </div>
       <div style={{ ...styles.salaLabel, margin: "22px 0 12px" }}>ÚLTIMAS AGENDAS</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-        {feed.length === 0 && <div style={{ fontSize: 12, color: "#6E8C88" }}>Sin actividad reciente.</div>}
+        {feed.length === 0 && <div style={{ fontSize: 12, color: "#748B88" }}>Sin actividad reciente.</div>}
         {feed.map((f, i) => (
           <div key={i} style={{ display: "flex", gap: 9, alignItems: "baseline" }}>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#4FBFAE", flex: "none" }}>{f.t}</span>
-            <span style={{ fontSize: 11.5, color: "#9FB7B3", lineHeight: 1.4 }}>{f.text}</span>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#6FBDAE", flex: "none" }}>{f.t}</span>
+            <span style={{ fontSize: 11.5, color: "#A4B6B3", lineHeight: 1.4 }}>{f.text}</span>
           </div>
         ))}
       </div>
@@ -1221,7 +1328,7 @@ function VistaSala({ ctx }) {
         <div><span style={styles.salaTotalLabel}>INV</span> <span style={styles.salaTotalValue}>{k1(totals.inv)}</span></div>
         <div><span style={styles.salaTotalLabel}>FACT</span> <span style={styles.salaTotalValue}>{k1(totals.fac)}</span></div>
         <div><span style={styles.salaTotalLabel}>CIERRES</span> <span style={styles.salaTotalValue}>{num2(totals.cie)}</span></div>
-        <div><span style={styles.salaTotalLabel}>ROAS</span> <span style={{ ...styles.salaTotalValue, color: "#4FBFAE" }}>{totals.roas != null ? totals.roas.toFixed(1).replace(".", ",") + "×" : "—"}</span></div>
+        <div><span style={styles.salaTotalLabel}>ROAS</span> <span style={{ ...styles.salaTotalValue, color: "#6FBDAE" }}>{totals.roas != null ? totals.roas.toFixed(1).replace(".", ",") + "×" : "—"}</span></div>
       </div>
 
       {!isMobile ? (
@@ -1412,6 +1519,33 @@ function VistaFinanzas({ ctx }) {
 }
 
 const styles = {
+  // --- Menú lateral (Sidebar) -- chrome nuevo y persistente, siempre oscuro sin importar la
+  // vista activa (a diferencia de `page`, que cambia de claro a oscuro solo en Sala de control).
+  appShell: { display: "flex", minHeight: "100vh", background: "#0B1F1D" },
+  sidebar: { width: 248, flex: "none", display: "flex", flexDirection: "column", background: "#0B1F1D", borderRight: "1px solid #182B28", padding: "18px 14px", gap: 14, maxHeight: "100vh", position: "sticky", top: 0, overflow: "hidden" },
+  sidebarLogoRow: { display: "flex", alignItems: "center", gap: 9, padding: "0 6px" },
+  sidebarLogoMark: { width: 26, height: 26, borderRadius: 7, background: "#0E7C7B", color: "#F2F7F5", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 14, flex: "none" },
+  sidebarLogoText: { fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600, fontSize: 15, color: "#F2F7F5" },
+  sidebarAllClients: { background: "#122B28", border: "1px solid #182B28", borderRadius: 10, padding: "8px 12px" },
+  sidebarAllClientsLabel: { fontSize: 12.5, fontWeight: 600, color: "#CCD8D5" },
+  sidebarAllClientsSub: { fontSize: 11, color: "#748B88", marginTop: 1 },
+  sidebarSearch: { fontFamily: "'Inter', sans-serif", fontSize: 12.5, color: "#CCD8D5", background: "#122B28", border: "1px solid #182B28", borderRadius: 8, padding: "7px 10px", width: "100%" },
+  sidebarScroll: { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 },
+  sidebarSection: { display: "flex", flexDirection: "column", gap: 2 },
+  sidebarSectionTitle: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: "0.08em", color: "#5C7470", padding: "4px 10px 6px" },
+  sidebarNavItem: { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", textAlign: "left", fontFamily: "'Inter', sans-serif", fontSize: 13, fontWeight: 500, color: "#A4B6B3", background: "transparent", border: "none", borderRadius: 8, padding: "8px 10px", cursor: "pointer" },
+  sidebarNavItemActive: { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", textAlign: "left", fontFamily: "'Inter', sans-serif", fontSize: 13, fontWeight: 600, color: "#F2F7F5", background: "#183330", border: "none", borderRadius: 8, padding: "8px 10px", cursor: "pointer" },
+  sidebarNavItemSoon: { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", textAlign: "left", fontFamily: "'Inter', sans-serif", fontSize: 13, fontWeight: 500, color: "#4C605D", background: "transparent", border: "none", borderRadius: 8, padding: "8px 10px", cursor: "not-allowed" },
+  sidebarSoonTag: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: "0.04em", color: "#5C7470", background: "#122B28", borderRadius: 999, padding: "2px 7px" },
+  sidebarClientRow: { display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 8, cursor: "pointer" },
+  sidebarClientDot: { width: 6, height: 6, borderRadius: "50%", flex: "none" },
+  sidebarClientName: { flex: 1, minWidth: 0, fontSize: 12.5, color: "#CCD8D5", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  sidebarClientRoas: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#748B88", flex: "none" },
+  sidebarFooter: { display: "flex", alignItems: "center", gap: 9, padding: "10px 6px 0", borderTop: "1px solid #182B28", flex: "none" },
+  sidebarAvatar: { width: 28, height: 28, borderRadius: "50%", background: "#243A38", color: "#CCD8D5", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600, flex: "none" },
+  sidebarFooterName: { fontSize: 12.5, fontWeight: 600, color: "#CCD8D5" },
+  sidebarFooterRole: { fontSize: 10.5, color: "#748B88" },
+
   page: { fontFamily: "'Inter', sans-serif", color: "#12201F", padding: "32px clamp(16px, 4vw, 48px)", minHeight: "100%" },
   header: { display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-end", gap: 20, marginBottom: 22, borderBottom: "1px solid #DCE4E2", paddingBottom: 20 },
   eyebrow: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.08em", color: "#0E7C7B", marginBottom: 6 },
@@ -1426,9 +1560,9 @@ const styles = {
   pillActive: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, padding: "8px 14px", borderRadius: 999, border: "1px solid #0E7C7B", background: "#0E7C7B", color: "#fff", cursor: "pointer" },
   filterRow: { display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 20 },
   thresholdsPanel: { display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", background: "#fff", border: "1px solid #E1E8E6", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "#5B6E6B" },
-  thresholdsPanelDark: { display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", background: "#122B28", border: "1px solid #1D3B38", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "#9FB7B3" },
+  thresholdsPanelDark: { display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", background: "#182B28", border: "1px solid #243A38", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "#A4B6B3" },
   thresholdsLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.04em" },
-  thresholdsLabelDark: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.04em", color: "#9FB7B3" },
+  thresholdsLabelDark: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.04em", color: "#A4B6B3" },
   thresholdsGrid: { display: "flex", flexWrap: "wrap", gap: "16px 28px", width: "100%" },
   thresholdsGroup: { display: "flex", flexDirection: "column", gap: 8 },
   thresholdsGroupTitle: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.04em", color: "#0E7C7B", fontWeight: 600 },
@@ -1492,26 +1626,26 @@ const styles = {
   tFootRow: { display: "flex", justifyContent: "space-between", marginTop: 14, paddingTop: 12, borderTop: "1px solid #EEF3F2" },
 
   // --- Sala de control (1c) ---
-  salaCard: { background: "#0B1F1D", border: "1px solid #1D3B38", borderRadius: 14, overflow: "hidden" },
-  salaTotalsRow: { display: "flex", flexWrap: "wrap", gap: 26, alignItems: "baseline", padding: "18px 22px", borderBottom: "1px solid #1D3B38" },
-  salaTotalLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.06em", color: "#6E8C88" },
+  salaCard: { background: "#101F1D", border: "1px solid #243A38", borderRadius: 14, overflow: "hidden" },
+  salaTotalsRow: { display: "flex", flexWrap: "wrap", gap: 26, alignItems: "baseline", padding: "18px 22px", borderBottom: "1px solid #243A38" },
+  salaTotalLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.06em", color: "#748B88" },
   salaTotalValue: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, color: "#F2F7F5" },
-  salaGrid3: { display: "grid", gridTemplateColumns: "250px 1fr 268px", gap: 1, background: "#1D3B38" },
-  salaGridMobile: { display: "flex", flexDirection: "column", gap: 1, background: "#1D3B38" },
-  salaCol: { background: "#0B1F1D", padding: "18px 20px" },
-  salaLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.08em", color: "#6E8C88", marginBottom: 14 },
-  salaClientName: { fontSize: 12.5, color: "#C9D8D5", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" },
-  salaPill: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "5px 10px", borderRadius: 999, border: "1px solid #1D3B38", background: "transparent", color: "#9FB7B3", cursor: "pointer" },
-  salaPillActive: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "5px 10px", borderRadius: 999, border: "1px solid #4FBFAE", background: "#123330", color: "#4FBFAE", cursor: "pointer" },
-  salaRankTrack: { height: 4, background: "#152E2B", borderRadius: 2, marginTop: 5 },
-  salaAlertCard: { background: "#122B28", border: "1px solid #1D3B38", borderLeft: "3px solid", borderRadius: 8, padding: "11px 13px" },
-  salaFooter: { padding: "12px 26px", borderTop: "1px solid #1D3B38", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#6E8C88" },
+  salaGrid3: { display: "grid", gridTemplateColumns: "250px 1fr 268px", gap: 1, background: "#243A38" },
+  salaGridMobile: { display: "flex", flexDirection: "column", gap: 1, background: "#243A38" },
+  salaCol: { background: "#101F1D", padding: "18px 20px" },
+  salaLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: "0.08em", color: "#748B88", marginBottom: 14 },
+  salaClientName: { fontSize: 12.5, color: "#CCD8D5", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" },
+  salaPill: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "5px 10px", borderRadius: 999, border: "1px solid #243A38", background: "transparent", color: "#A4B6B3", cursor: "pointer" },
+  salaPillActive: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "5px 10px", borderRadius: 999, border: "1px solid #6FBDAE", background: "#183330", color: "#6FBDAE", cursor: "pointer" },
+  salaRankTrack: { height: 4, background: "#1B2E2B", borderRadius: 2, marginTop: 5 },
+  salaAlertCard: { background: "#182B28", border: "1px solid #243A38", borderLeft: "3px solid", borderRadius: 8, padding: "11px 13px" },
+  salaFooter: { padding: "12px 26px", borderTop: "1px solid #243A38", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#748B88" },
 
   // --- Panel "Ayer" de Sala de control (1c) ---
   ayerGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 10 },
-  ayerCard: { background: "#122B28", border: "1px solid #1D3B38", borderRadius: 10, padding: "12px 14px", cursor: "pointer" },
+  ayerCard: { background: "#182B28", border: "1px solid #243A38", borderRadius: 10, padding: "12px 14px", cursor: "pointer" },
   ayerMetricsGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 8px", marginTop: 12 },
-  ayerMetricLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: "0.03em", color: "#6E8C88", marginBottom: 3 },
+  ayerMetricLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: "0.03em", color: "#748B88", marginBottom: 3 },
   ayerMetricValue: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600 },
 };
 
@@ -1519,12 +1653,12 @@ const styles = {
 // "Sala de control" -- misma estructura, solo cambian los colores de texto.
 const darkTop = {
   ...styles,
-  header: { ...styles.header, borderBottom: "1px solid #1D3B38" },
-  eyebrow: { ...styles.eyebrow, color: "#4FBFAE" },
+  header: { ...styles.header, borderBottom: "1px solid #243A38" },
+  eyebrow: { ...styles.eyebrow, color: "#6FBDAE" },
   h1: { ...styles.h1, color: "#F2F7F5" },
-  subtitle: { ...styles.subtitle, color: "#9FB7B3" },
-  statusBadge: { ...styles.statusBadge, color: "#9FB7B3" },
-  refreshBtn: { ...styles.refreshBtn, color: "#4FBFAE" },
+  subtitle: { ...styles.subtitle, color: "#A4B6B3" },
+  statusBadge: { ...styles.statusBadge, color: "#A4B6B3" },
+  refreshBtn: { ...styles.refreshBtn, color: "#6FBDAE" },
 };
 
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(Cartera));
