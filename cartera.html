@@ -1201,7 +1201,9 @@ function VistaSala({ ctx }) {
     () => rows.filter((r) => r.ok).slice().sort((a, b) => normText(a.name).localeCompare(normText(b.name))),
     [rows]
   );
-  const AYER = yesterdayISO();
+  // Último día hábil (no el domingo/sábado calendario) -- los lunes este panel muestra los
+  // datos del viernes, a pedido de Humberto.
+  const AYER = lastBusinessDayISO();
 
   const metric = RANKING_METRICS.find((m) => m.key === rankKey) || RANKING_METRICS[0];
   // Ranking ordenado por la métrica elegida (siempre entre cuentas con datos) -- las cuentas
